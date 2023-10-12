@@ -68,14 +68,14 @@ async fn process_header() {
 
     // Send a header to the core.
     tx_primary_messages
-        .send(PrimaryMessage::Header(header()))
+        .send(PrimaryPrimaryMessage::Header(header()))
         .await
         .unwrap();
 
     // Ensure the listener correctly received the vote.
     let received = handle.await.unwrap();
     match bincode::deserialize(&received).unwrap() {
-        PrimaryMessage::Vote(x) => assert_eq!(x, expected),
+        PrimaryPrimaryMessage::Vote(x) => assert_eq!(x, expected),
         x => panic!("Unexpected message: {:?}", x),
     }
 
@@ -140,7 +140,7 @@ async fn process_header_missing_parent() {
     };
     let id = header.id.clone();
     tx_primary_messages
-        .send(PrimaryMessage::Header(header))
+        .send(PrimaryPrimaryMessage::Header(header))
         .await
         .unwrap();
 
@@ -200,7 +200,7 @@ async fn process_header_missing_payload() {
     };
     let id = header.id.clone();
     tx_primary_messages
-        .send(PrimaryMessage::Header(header))
+        .send(PrimaryPrimaryMessage::Header(header))
         .await
         .unwrap();
 
@@ -268,7 +268,7 @@ async fn process_votes() {
     // Send a votes to the core.
     for vote in votes(&Header::default()) {
         tx_primary_messages
-            .send(PrimaryMessage::Vote(vote))
+            .send(PrimaryPrimaryMessage::Vote(vote))
             .await
             .unwrap();
     }
@@ -276,7 +276,7 @@ async fn process_votes() {
     // Ensure all listeners got the certificate.
     for received in try_join_all(handles).await.unwrap() {
         match bincode::deserialize(&received).unwrap() {
-            PrimaryMessage::Certificate(x) => assert_eq!(x, expected),
+            PrimaryPrimaryMessage::Certificate(x) => assert_eq!(x, expected),
             x => panic!("Unexpected message: {:?}", x),
         }
     }
@@ -336,7 +336,7 @@ async fn process_certificates() {
 
     for x in certificates.clone() {
         tx_primary_messages
-            .send(PrimaryMessage::Certificate(x))
+            .send(PrimaryPrimaryMessage::Certificate(x))
             .await
             .unwrap();
     }

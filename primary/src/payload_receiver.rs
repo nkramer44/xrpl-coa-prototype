@@ -16,7 +16,7 @@ pub struct PayloadReceiver {
 impl PayloadReceiver {
     pub fn spawn(store: Store, rx_workers: Receiver<(Digest, WorkerId)>) {
         tokio::spawn(async move {
-            Self { store, rx_workers }.run().await;
+            Self { store, rx_workers}.run().await;
         });
     }
 

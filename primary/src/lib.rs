@@ -1,26 +1,20 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 #[macro_use]
 mod error;
-mod aggregators;
-mod certificate_waiter;
 mod core;
-mod garbage_collector;
-mod header_waiter;
 mod helper;
-mod messages;
-mod payload_receiver;
-mod primary;
-mod proposer;
-mod synchronizer;
-pub mod proposal;
 mod ledger;
+mod payload_receiver;
+mod proposal_waiter;
+mod primary;
+pub mod proposal;
 mod validations;
+mod validation_waiter;
 
-#[cfg(test)]
-#[path = "tests/common.rs"]
-mod common;
+// #[cfg(test)]
+// #[path = "tests/common.rs"]
+// mod common;
 
-pub use crate::messages::{Certificate, Header};
 pub use crate::primary::{Primary, PrimaryWorkerMessage, Round, WorkerPrimaryMessage, PrimaryConsensusMessage, ConsensusPrimaryMessage};
 pub use crate::ledger::Ledger;
 pub use crate::validations::{SignedValidation, Validation};

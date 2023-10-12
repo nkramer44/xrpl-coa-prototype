@@ -1,16 +1,16 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
-use std::path::Ancestors;
+//use std::path::Ancestors;
 use serde::{Deserialize, Serialize};
 
 use xrpl_consensus_core::LedgerIndex;
-use config::WorkerId;
+//use config::WorkerId;
 
 use crypto::{Digest, Hash};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Ledger {
-    id: Digest,
+    pub id: Digest,
     seq: LedgerIndex,
     /// Ordered by latest -> oldest, ie the first element will be this ledger's parent.
     pub ancestors: Vec<Digest>,

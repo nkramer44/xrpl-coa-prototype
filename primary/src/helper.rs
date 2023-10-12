@@ -1,5 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::primary::PrimaryMessage;
+use crate::primary::PrimaryPrimaryMessage;
 use bytes::Bytes;
 use config::Committee;
 use crypto::{Digest, PublicKey};
@@ -8,13 +8,13 @@ use network::SimpleSender;
 use store::Store;
 use tokio::sync::mpsc::Receiver;
 
-/// A task dedicated to help other authorities by replying to their certificates requests.
+/// A task dedicated to help others by replying to their ledger requests.
 pub struct Helper {
     /// The committee information.
     committee: Committee,
     /// The persistent storage.
     store: Store,
-    /// Input channel to receive certificates requests.
+    /// Input channel to receive ledger requests.
     rx_primaries: Receiver<(Vec<Digest>, PublicKey)>,
     /// A network sender to reply to the sync requests.
     network: SimpleSender,
@@ -40,8 +40,6 @@ impl Helper {
 
     async fn run(&mut self) {
         while let Some((digests, origin)) = self.rx_primaries.recv().await {
-            // TODO [issue #195]: Do some accounting to prevent bad nodes from monopolizing our resources.
-
             // get the requestors address.
             let address = match self.committee.primary(&origin) {
                 Ok(x) => x.primary_to_primary,
@@ -56,10 +54,10 @@ impl Helper {
                 match self.store.read(digest.to_vec()).await {
                     Ok(Some(data)) => {
                         // TODO: Remove this deserialization-serialization in the critical path.
-                        let certificate = bincode::deserialize(&data)
+                        let obj = bincode::deserialize(&data)
                             .expect("Failed to deserialize our own certificate");
-                        let bytes = bincode::serialize(&PrimaryMessage::Certificate(certificate))
-                            .expect("Failed to serialize our own certificate");
+                        let bytes = bincode::serialize(&PrimaryPrimaryMessage::Ledger(obj))
+                            .expect("Failed to serialize our own certificate");//TODO .expect
                         self.network.send(address, Bytes::from(bytes)).await;
                     }
                     Ok(None) => (),

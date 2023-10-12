@@ -7,7 +7,7 @@ use config::Import as _;
 use config::{Committee, KeyPair, Parameters, WorkerId};
 use consensus::Consensus;
 use env_logger::Env;
-use primary::{Certificate, Primary};
+use primary::Primary;//{Certificate, Primary};
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver};
 use xrpl_consensus_core::WallNetClock;
@@ -93,26 +93,24 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
     let store = Store::new(store_path).context("Failed to create a store")?;
 
     // Channels the sequence of certificates.
-    let (tx_output, rx_output) = channel(CHANNEL_CAPACITY);
+//    let (tx_output, rx_output) = channel(CHANNEL_CAPACITY);
 
     // Check whether to run a primary, a worker, or an entire authority.
     match matches.subcommand() {
         // Spawn the primary and consensus core.
         ("primary", _) => {
-            let (tx_new_certificates, rx_new_certificates) = channel(CHANNEL_CAPACITY);
-            let (tx_feedback, rx_feedback) = channel(CHANNEL_CAPACITY);
+            // let (tx_new_certificates, rx_new_certificates) = channel(CHANNEL_CAPACITY);
+            // let (tx_feedback, rx_feedback) = channel(CHANNEL_CAPACITY);
             let (tx_primary_consensus, rx_primary_consensus) = channel(CHANNEL_CAPACITY);
             let (tx_consensus_primary, rx_consensus_primary) = channel(CHANNEL_CAPACITY);
             let node_id = keypair.name.clone();
             let signature_service = SignatureService::new(keypair.secret);
             Primary::spawn(
                 node_id,
-                signature_service.clone(),
+                //signature_service.clone(),
                 committee.clone(),
-                parameters.clone(),
+                //parameters.clone(),
                 store,
-                /* tx_consensus */ tx_new_certificates,
-                /* rx_consensus */ rx_feedback,
                 tx_primary_consensus,
                 rx_consensus_primary
             );
@@ -142,15 +140,15 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
     }
 
     // Analyze the consensus' output.
-    analyze(rx_output).await;
+    //analyze(rx_output).await;
 
     // If this expression is reached, the program ends and all other tasks terminate.
     unreachable!();
 }
 
-/// Receives an ordered list of certificates and apply any application-specific logic.
-async fn analyze(mut rx_output: Receiver<Certificate>) {
-    while let Some(_certificate) = rx_output.recv().await {
-        // NOTE: Here goes the application logic.
-    }
-}
+// /// Receives an ordered list of certificates and apply any application-specific logic.
+// async fn analyze(mut rx_output: Receiver<Certificate>) {
+//     while let Some(_certificate) = rx_output.recv().await {
+//         // NOTE: Here goes the application logic.
+//     }
+// }

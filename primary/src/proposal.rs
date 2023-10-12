@@ -1,9 +1,10 @@
 use std::collections::HashSet;
+//use std::convert::TryInto;
 use serde::{Deserialize, Serialize};
 use xrpl_consensus_core::LedgerIndex;
 
 use config::WorkerId;
-use crypto::{Digest, PublicKey, Signature, SignatureService};
+use crypto::{Digest, Hash, PublicKey, Signature, SignatureService};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ConsensusRound(u8);
@@ -69,7 +70,27 @@ impl Proposal {
             signature,
         }
     }
+
+    pub fn compute_id(self) -> Digest {
+        bincode::serialize(&(self.round, self.parent_id, self.ledger_index, self.batches, self.node_id)).unwrap().as_slice().digest()
+    }
 }
+
+// impl Hash for Proposal {
+//     fn digest(&self) -> Digest {
+//         let mut hasher = Sha512::new();
+//         hasher.update(&self.author);
+//         hasher.update(self.round.to_le_bytes());
+//         for (x, y) in &self.payload {
+//             hasher.update(x);
+//             hasher.update(y.to_le_bytes());
+//         }
+//         for x in &self.parents {
+//             hasher.update(x);
+//         }
+//         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+//     }
+// }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignedProposal {
