@@ -11,6 +11,7 @@ use log::{error, info};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
+use xrpl_consensus_core::Validation;
 use config::Committee;
 use crypto::{Digest, PublicKey};
 use network::SimpleSender;
@@ -83,30 +84,57 @@ impl ValidationWaiter {
         });
     }
 
+    async fn try_deliver(&mut self, ledger_id: &Digest) {
+        match self.validation_dependencies.remove(ledger_id) {
+            Some(signed_validations) => {
+                for signed_validation in signed_validations.into_iter() {
+                    self.tx_loopback_validations.send(signed_validation).await.expect("TODO: panic message");
+                }
+            },
+            None => {}
+        }
+
+        let mut to_deliver = VecDeque::new();
+        self.to_acquire.retain(| (v, _) | return if v.ledger_id() == *ledger_id {
+            to_deliver.push_back(v.clone());
+            false
+        } else {
+            true
+        });
+        for v in to_deliver {
+            self.tx_loopback_validations.send(v).await.expect("TODO: panic message");
+        }
+    }
+
     #[async_recursion]
     async fn store_children(&mut self, parent_id: &Digest) {
         match self.ledger_dependencies.remove(parent_id) {
             Some((children, _)) => {
                 for ledger in children.into_iter() {
-                    self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
-                    match self.validation_dependencies.remove(&ledger.id) {
-                        Some(signed_validations) => {
-                            for signed_validation in signed_validations.into_iter() {
-                                self.tx_loopback_validations.send(signed_validation).await.expect("TODO: panic message");
-                            }
-                        },
-                        None => {}
-                    }
-                    //.expect("TODO: panic message");
-                    //TODO why expect
-                    self.store_children(&ledger.id).await;
+                    self.store_ledger(ledger, false).await;
+
+                    // self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
+                    // self.tx_loopback_ledgers.send(ledger.clone()).await.expect("TODO: panic message");
+                    // self.try_deliver(&ledger.id).await;
+                    // self.store_children(&ledger.id).await;
                 }
             }
             None => {}
         }
     }
 
-    async fn store_ledger(&mut self, ledger: Ledger) -> Option<(Digest, PublicKey)> {
+    async fn store_ledger(&mut self, ledger: Ledger, own : bool){
+        self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
+        let lid = ledger.id.clone();
+        if ! own {
+            self.tx_loopback_ledgers.send(ledger).await.expect("TODO: panic message");
+            //TODO deliver ledger in the same channel as validations so that ledgers are always delivered before the validations!!!
+        }
+        self.try_deliver(&lid).await;
+        self.store_children(&lid).await;
+    }
+
+    async fn try_store_ledger(&mut self, ledger: Ledger) -> Option<(Digest, PublicKey)> {
         if ledger.ancestors.is_empty() || self.ledger_dependencies.get(&ledger.id).is_none() {
             return None;
         }
@@ -114,18 +142,11 @@ impl ValidationWaiter {
         let parent = ledger.ancestors[0].clone();
         match self.store.read(parent.to_vec()).await {
             Ok(Some(_)) => {
-                self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
-
-                match self.validation_dependencies.remove(&ledger.id) {
-                    Some(signed_validations) => {
-                        for signed_validation in signed_validations.into_iter() {
-                            self.tx_loopback_validations.send(signed_validation).await.expect("TODO: panic message");
-                        }
-                    },
-                    None => {}
-                }
-
-                self.store_children(&ledger.id).await;
+                self.store_ledger(ledger, false).await;
+                // self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
+                // self.tx_loopback_ledgers.send(ledger.clone()).await.expect("TODO: panic message");
+                // self.try_deliver(&ledger.id).await;
+                // self.store_children(&ledger.id).await;
                 return None;
             }
             Ok(None) => {
@@ -152,28 +173,6 @@ impl ValidationWaiter {
                 return None;
             }
         }
-
-
-        //     Ok(Some(_)) => {
-        //         // self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
-        //         // self.store_children(&ledger.id);
-        //         // return None;
-        //     },
-        //     Ok(None) => {
-        //         // let (_, pk) = self.ledger_dependencies.get(&ledger.id).unwrap();
-        //         // let pk = pk.clone();
-        //         // let entry = self.ledger_dependencies.get_mut(&parent);
-        //         // match entry {
-        //         //     Some((ledgers, _)) => ledgers.push(ledger),
-        //         //     None => self.ledger_dependencies.insert(parent.clone(), (Vec[ledger], pk.clone())),
-        //         // }
-        //         // return Some((parent, pk));
-        //     },
-        //     Err(e) => {
-        //         // error!("{}", e);
-        //     }
-        // }
-
     }
 
     async fn run(&mut self) {
@@ -213,20 +212,11 @@ impl ValidationWaiter {
                             error!("{}", e);
                         }
                     }
-
-                    // if self.store.read(ledger_id.to_vec()).await.is_none() {
-                    //
-                    // }else{
-                    //     self.tx_loopback_validations
-                    //     .send(signed_validation)
-                    //     .await //TODO need to wait?
-                    //     .expect("Failed to send validation");
-                    // }
                 },
 
                 Some(ledger) = self.rx_network_ledgers.recv() => {
                     //TODO verify ledger
-                    match self.store_ledger(ledger).await {
+                    match self.try_store_ledger(ledger).await {
                         Some((digest, pk)) => {
                             // acquire(digest, pk).await;
                             let address = self.committee
@@ -247,17 +237,10 @@ impl ValidationWaiter {
                 Some(ledger) = self.rx_own_ledgers.recv() => {
                     //TODO check parent exist in DB
                     info!("Waiter got our own ledger {:?}", ledger.id);
-                    self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
-                    match self.validation_dependencies.remove(&ledger.id) {
-                        Some(signed_validations) => {
-                            info!("Sending {:?} validations to consensus.", signed_validations.len());
-                            for signed_validation in signed_validations.into_iter() {
-                                self.tx_loopback_validations.send(signed_validation).await.expect("TODO: panic message");
-                            }
-                        },
-                        None => {}
-                    }
-                    self.store_children(&ledger.id).await;
+                    self.store_ledger(ledger, true).await;
+                    // self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
+                    // self.try_deliver(&ledger.id).await;
+                    // self.store_children(&ledger.id).await;
                 },
 
                 () = &mut timer => {
