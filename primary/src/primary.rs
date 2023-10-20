@@ -92,6 +92,7 @@ impl Primary {
         let (tx_loopback_validations, rx_loopback_validations) = channel(CHANNEL_CAPACITY);
         let (tx_loopback_ledgers, rx_loopback_ledgers) = channel(CHANNEL_CAPACITY);
 
+        let (tx_core_to_proposal_waiter, rx_core_to_proposal_waiter) = channel(CHANNEL_CAPACITY);
         let (tx_own_ledgers, rx_own_ledgers) = channel(CHANNEL_CAPACITY);
 
         parameters.log();
@@ -154,6 +155,7 @@ impl Primary {
             //consensus_round,
             rx_network_proposals,
             tx_loopback_proposals,
+            rx_core_to_proposal_waiter,
         );
 
         ValidationWaiter::spawn(
@@ -179,6 +181,7 @@ impl Primary {
             rx_loopback_validations,
             rx_loopback_ledgers,
             tx_own_ledgers,
+            tx_core_to_proposal_waiter,
         );
 
         // NOTE: This log entry is used to compute performance.

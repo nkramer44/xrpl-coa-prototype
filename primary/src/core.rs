@@ -16,6 +16,7 @@ use tokio::time::{sleep, Duration, Instant};
 use crate::{ConsensusPrimaryMessage, Ledger, PrimaryConsensusMessage, SignedValidation};
 use config::WorkerId;
 use crate::proposal::{SignedProposal};
+use crate::proposal_waiter::CoreProposalWaiterMessage;
 
 // #[cfg(test)]
 // #[path = "tests/core_tests.rs"]
@@ -41,6 +42,7 @@ pub struct Core {
     rx_loopback_validations: Receiver<SignedValidation>,
     rx_loopback_ledgers: Receiver<Ledger>,
     tx_own_ledgers: Sender<Ledger>,
+    tx_proposal_waiter: Sender<CoreProposalWaiterMessage>,
 
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
@@ -63,6 +65,7 @@ impl Core {
         rx_loopback_validations: Receiver<SignedValidation>,
         rx_loopback_ledgers: Receiver<Ledger>,
         tx_own_ledgers: Sender<Ledger>,
+        tx_proposal_waiter: Sender<CoreProposalWaiterMessage>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -77,6 +80,7 @@ impl Core {
                 rx_loopback_validations,
                 rx_loopback_ledgers,
                 tx_own_ledgers,
+                tx_proposal_waiter,
                 network: ReliableSender::new(),
                 cancel_handlers: vec![],
             }
@@ -100,6 +104,10 @@ impl Core {
             .send(PrimaryConsensusMessage::Batch((batch, worker_id)))
             .await //TODO need to wait?
             .expect("Failed to send workers' digests");
+        self.tx_proposal_waiter
+            .send(CoreProposalWaiterMessage::Batch(batch))
+            .await
+            .expect("cannot send workers' digests");
     }
 
     async fn process_proposal(&mut self, proposal: SignedProposal) {
@@ -156,7 +164,8 @@ impl Core {
     }
 
     async fn process_own_ledger(&mut self, ledger: Ledger) {
-        self.tx_own_ledgers.send(ledger).await.expect("cannot send self ledger to waiter");
+        self.tx_own_ledgers.send(ledger.clone()).await.expect("cannot send self ledger to waiter");
+        self.tx_proposal_waiter.send(CoreProposalWaiterMessage::NewLedger(ledger)).await.expect("cannot send self ledger to waiter");
     }
 
     // Main loop listening to incoming messages.

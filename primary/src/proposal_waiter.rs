@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
+use crate::Ledger;
 use crate::proposal::{SignedProposal};
 
 const TIMER_RESOLUTION: u64 = 100;
@@ -27,6 +28,12 @@ fn clock() -> u128 {
         .as_millis()
 }
 
+#[derive(Debug)]
+pub enum CoreProposalWaiterMessage {
+    Batch(Digest),
+    NewLedger(Ledger),
+}
+
 pub struct ProposalWaiter {
     /// The name of this authority.
     name: PublicKey,
@@ -37,7 +44,10 @@ pub struct ProposalWaiter {
 
     rx_network_proposal: Receiver<SignedProposal>,
     tx_loopback_proposal: Sender<SignedProposal>,
-    to_acquire : VecDeque<(SignedProposal, u128)>,
+    rx_from_core: Receiver<CoreProposalWaiterMessage>,
+
+    batch_cache: HashSet<Digest>,
+    to_acquire: VecDeque<(SignedProposal, u128)>,
 
     /// Network driver allowing to send messages.
     network: SimpleSender,
@@ -56,6 +66,7 @@ impl ProposalWaiter {
         store: Store,
         rx_network_proposal: Receiver<SignedProposal>,
         tx_loopback_proposal: Sender<SignedProposal>,
+        rx_from_core: Receiver<CoreProposalWaiterMessage>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -64,7 +75,9 @@ impl ProposalWaiter {
                 store,
                 rx_network_proposal,
                 tx_loopback_proposal,
-                to_acquire : VecDeque::new(),
+                rx_from_core,
+                batch_cache: HashSet::new(),
+                to_acquire: VecDeque::new(),
                 network: SimpleSender::new(),
                 batch_requests: HashSet::new(),
                 pending: HashSet::new(),
@@ -110,15 +123,17 @@ impl ProposalWaiter {
 
                     let mut missing = false;
                     for (digest, worker_id) in batches.iter() {
-                        let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
-                        match self.store.read(key).await {
-                            Ok(Some(_)) => {},
-                            Ok(None) => {
-                                missing = true;
-                                break;
-                            },
-                            Err(e) => {
-                                error!("{}", e);
+                        if ! self.batch_cache.contains(digest) {
+                            let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
+                            match self.store.read(key).await {
+                                Ok(Some(_)) => {},
+                                Ok(None) => {
+                                    missing = true;
+                                    break;
+                                },
+                                Err(e) => {
+                                    error!("{}", e);
+                                }
                             }
                         }
                     }
@@ -133,6 +148,19 @@ impl ProposalWaiter {
 
                     let now = clock();
                     self.to_acquire.push_back((signed_proposal, now));
+                },
+
+                Some(message) = self.rx_from_core.recv() => {
+                    match message {
+                        CoreProposalWaiterMessage::NewLedger(ledger) => {
+                            for batch in ledger.batch_set{
+                                self.batch_cache.remove(&batch);
+                            }
+                        },
+                        CoreProposalWaiterMessage::Batch(batch) => {
+                            self.batch_cache.insert(batch);
+                        }
+                    }
                 },
 
                 Some(result) = waiting.next() => match result {
@@ -179,15 +207,17 @@ impl ProposalWaiter {
 
                         let mut missing = HashMap::new();
                         for (digest, worker_id) in batches.iter() {
-                            let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
-                            match self.store.read(key).await {
-                                Ok(Some(_)) => {},
-                                Ok(None) => {
-                                    missing.insert(*digest, *worker_id);
-                                },
-                                Err(e) => {
-                                    error!("{}", e);
-                                },
+                            if ! self.batch_cache.contains(digest) {
+                                let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
+                                match self.store.read(key).await {
+                                    Ok(Some(_)) => {},
+                                    Ok(None) => {
+                                        missing.insert(*digest, *worker_id);
+                                    },
+                                    Err(e) => {
+                                        error!("{}", e);
+                                    },
+                                }
                             }
                         }
 
@@ -222,10 +252,6 @@ impl ProposalWaiter {
                                 self.batch_requests.insert(digest.clone());
                                 requires_sync.entry(worker_id).or_insert_with(Vec::new).push(digest);
                             }
-                            // self.batch_requests.entry(digest.clone()).or_insert_with(|| {
-                            //
-                            //     round
-                            // });
                         }
                         for (worker_id, digests) in requires_sync {
                             let address = self.committee
