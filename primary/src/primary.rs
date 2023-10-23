@@ -69,6 +69,12 @@ pub enum ConsensusPrimaryMessage {
     NewLedger(Ledger),
 }
 
+#[derive(Debug)]
+pub enum LedgerOrValidation {
+    Ledger(Ledger),
+    Validation(SignedValidation)
+}
+
 pub struct Primary;
 
 impl Primary {
@@ -89,8 +95,7 @@ impl Primary {
         let (tx_ledger_requests, rx_ledger_requests) = channel(CHANNEL_CAPACITY);
 
         let (tx_loopback_proposals, rx_loopback_proposals) = channel(CHANNEL_CAPACITY);
-        let (tx_loopback_validations, rx_loopback_validations) = channel(CHANNEL_CAPACITY);
-        let (tx_loopback_ledgers, rx_loopback_ledgers) = channel(CHANNEL_CAPACITY);
+        let (tx_loopback_validations_ledgers, rx_loopback_validations_ledgers) = channel(CHANNEL_CAPACITY);
 
         let (tx_core_to_proposal_waiter, rx_core_to_proposal_waiter) = channel(CHANNEL_CAPACITY);
         let (tx_own_ledgers, rx_own_ledgers) = channel(CHANNEL_CAPACITY);
@@ -164,8 +169,7 @@ impl Primary {
             store.clone(),
             rx_network_validations,
             rx_network_ledgers,
-            tx_loopback_validations,
-            tx_loopback_ledgers,
+            tx_loopback_validations_ledgers,
             rx_own_ledgers,
         );
 
@@ -178,8 +182,7 @@ impl Primary {
             rx_consensus_primary,
             rx_stored_batches,
             rx_loopback_proposals,
-            rx_loopback_validations,
-            rx_loopback_ledgers,
+            rx_loopback_validations_ledgers,
             tx_own_ledgers,
             tx_core_to_proposal_waiter,
         );

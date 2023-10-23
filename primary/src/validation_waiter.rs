@@ -16,7 +16,7 @@ use config::Committee;
 use crypto::{Digest, PublicKey};
 use network::SimpleSender;
 use crate::{Ledger, SignedValidation};
-use crate::primary::PrimaryPrimaryMessage;
+use crate::primary::{PrimaryPrimaryMessage, LedgerOrValidation};
 
 const TIMER_RESOLUTION: u64 = 100;
 const ACQUIRE_DELAY: u128 = 300;
@@ -42,8 +42,7 @@ pub struct ValidationWaiter {
     store: Store,
     rx_network_validations: Receiver<SignedValidation>,
     rx_network_ledgers: Receiver<Ledger>,
-    tx_loopback_validations: Sender<SignedValidation>,
-    tx_loopback_ledgers: Sender<Ledger>,
+    tx_loopback_validations_ledgers: Sender<LedgerOrValidation>,
     rx_own_ledgers: Receiver<Ledger>,
     to_acquire: VecDeque<(SignedValidation, u128)>,
     validation_dependencies: HashMap<Digest, Vec<SignedValidation>>,
@@ -60,8 +59,7 @@ impl ValidationWaiter {
         store: Store,
         rx_network_validations: Receiver<SignedValidation>,
         rx_network_ledgers: Receiver<Ledger>,
-        tx_loopback_validations: Sender<SignedValidation>,
-        tx_loopback_ledgers: Sender<Ledger>,
+        tx_loopback_validations_ledgers: Sender<LedgerOrValidation>,
         rx_own_ledgers: Receiver<Ledger>,
     ) {
         tokio::spawn(async move {
@@ -71,8 +69,7 @@ impl ValidationWaiter {
                 store,
                 rx_network_validations,
                 rx_network_ledgers,
-                tx_loopback_validations,
-                tx_loopback_ledgers,
+                tx_loopback_validations_ledgers,
                 rx_own_ledgers,
                 to_acquire: VecDeque::new(),
                 validation_dependencies: HashMap::new(),
@@ -88,7 +85,9 @@ impl ValidationWaiter {
         match self.validation_dependencies.remove(ledger_id) {
             Some(signed_validations) => {
                 for signed_validation in signed_validations.into_iter() {
-                    self.tx_loopback_validations.send(signed_validation).await.expect("TODO: panic message");
+                    self.tx_loopback_validations_ledgers.send(LedgerOrValidation::Validation(signed_validation))
+                        .await
+                        .expect("TODO: panic message");
                 }
             },
             None => {}
@@ -102,7 +101,9 @@ impl ValidationWaiter {
             true
         });
         for v in to_deliver {
-            self.tx_loopback_validations.send(v).await.expect("TODO: panic message");
+            self.tx_loopback_validations_ledgers.send(LedgerOrValidation::Validation(v))
+                .await
+                .expect("TODO: panic message");
         }
     }
 
@@ -123,12 +124,13 @@ impl ValidationWaiter {
         }
     }
 
-    async fn store_ledger(&mut self, ledger: Ledger, own : bool){
+    async fn store_ledger(&mut self, ledger: Ledger, own: bool){
         self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
         let lid = ledger.id.clone();
-        if ! own {
-            self.tx_loopback_ledgers.send(ledger).await.expect("TODO: panic message");
-            //TODO deliver ledger in the same channel as validations so that ledgers are always delivered before the validations!!!
+        if !own {
+            self.tx_loopback_validations_ledgers.send(LedgerOrValidation::Ledger(ledger))
+                .await
+                .expect("TODO: panic message");
         }
         self.try_deliver(&lid).await;
         self.store_children(&lid).await;
@@ -199,8 +201,8 @@ impl ValidationWaiter {
                     let ledger_id = signed_validation.validation.ledger_id;
                     match self.store.read(ledger_id.to_vec()).await{
                         Ok(Some(_)) => {
-                            self.tx_loopback_validations
-                            .send(signed_validation)
+                            self.tx_loopback_validations_ledgers
+                            .send(LedgerOrValidation::Validation(signed_validation))
                             .await //TODO need to wait?
                             .expect("Failed to send validation");
                         }
@@ -216,6 +218,7 @@ impl ValidationWaiter {
 
                 Some(ledger) = self.rx_network_ledgers.recv() => {
                     //TODO verify ledger
+                    info!("Received ledger {:?} from the network.", ledger.id);
                     match self.try_store_ledger(ledger).await {
                         Some((digest, pk)) => {
                             // acquire(digest, pk).await;
@@ -225,7 +228,7 @@ impl ValidationWaiter {
                                 .primary_to_primary;
                             let mut digests = vec![];
                             digests.push(digest);
-                            let message = PrimaryPrimaryMessage::LedgerRequest(digests,pk);
+                            let message = PrimaryPrimaryMessage::LedgerRequest(digests, self.name);
                             let bytes = bincode::serialize(&message)
                                 .expect("Failed to serialize batch sync request");
                             self.network.send(address, Bytes::from(bytes)).await;
@@ -274,9 +277,10 @@ impl ValidationWaiter {
 
                                 let mut digests = vec![];
                                 digests.push(digest);
-                                let message = PrimaryPrimaryMessage::LedgerRequest(digests,pk);
+                                let message = PrimaryPrimaryMessage::LedgerRequest(digests, self.name);
                                 let bytes = bincode::serialize(&message)
                                 .expect("Failed to serialize batch sync request");
+                                info!("Sending LedgerRequest to {:?} for ledger {:?}", pk, digest);
                                 self.network.send(address, Bytes::from(bytes)).await;
                                 //                                        acquire(digest, pk).await;
                             }

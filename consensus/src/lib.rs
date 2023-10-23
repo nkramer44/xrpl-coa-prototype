@@ -132,7 +132,7 @@ impl Consensus {
                     self.on_proposal_received(proposal);
                 }
                 PrimaryConsensusMessage::SyncedLedger(synced_ledger) => {
-                    // info!("Received SyncedLedger.");
+                    info!("Received SyncedLedger {:?}.", synced_ledger.id);
                     self.validations.adaptor_mut().add_ledger(synced_ledger);
                 }
                 PrimaryConsensusMessage::Validation(validation) => {
@@ -195,7 +195,7 @@ impl Consensus {
     async fn propose_first(&mut self) {
         self.state = ConsensusState::Deliberating;
 
-        let batch_set: HashSet<(Digest, WorkerId)> = if self.batch_pool.len() > MAX_PROPOSAL_SIZE {
+        let mut batch_set: Vec<(Digest, WorkerId)> = if self.batch_pool.len() > MAX_PROPOSAL_SIZE {
             self.batch_pool.drain(self.batch_pool.len() - MAX_PROPOSAL_SIZE..).collect()
         } else {
             self.batch_pool.drain(..).collect()
@@ -209,7 +209,69 @@ impl Consensus {
     }
 
     async fn re_propose(&mut self) {
-        if self.check_consensus() {
+        match self.check_consensus() {
+            Some(batches) => {
+                info!("We have consensus!");
+                self.build_ledger(batches).await;
+            }
+            None => {
+                info!("We don't have consensus :(");
+                // threshold is the percentage of UNL members who need to propose the same set of batches
+                let threshold = self.round.threshold();
+                info!("Threshold: {:?}", threshold);
+                // This is the number of UNL members who need to propose the same set of batches based
+                // on the threshold percentage.
+                let num_nodes_threshold = (self.committee.authorities.len() as f32 * threshold).ceil() as u32;
+                info!("Num nodes needed: {:?}", num_nodes_threshold);
+
+                let num_proposals_for_this_ledger = self.proposals.iter()
+                    .map(|p| p.1)
+                    .filter(|p| p.proposal.parent_id == self.latest_ledger.id)
+                    // .filter(|p| p.proposal.round == self.round - 1)
+                    .count();
+                info!("We have {:?} proposals for ledger {:?}", num_proposals_for_this_ledger, self.latest_ledger.id);
+
+                if num_proposals_for_this_ledger < num_nodes_threshold as usize {
+                    info!("We don't have enough proposals for child of ledger {:?}. Deferring to next round.", self.latest_ledger.id);
+                    return
+                }
+
+                // This will build a HashMap of (Digest, WorkerId) -> number of validators that proposed it,
+                // then filter that HashMap to the (Digest, WorkerId)s that have a count > num_nodes_threshold
+                // and collect that into a new proposal set.
+                let mut new_proposal_set: Vec<(Digest, WorkerId)> = self.proposals.iter()
+                    .map(|v| v.1)
+                    .filter(|v| v.proposal.parent_id == self.latest_ledger.id)
+                    .flat_map(|v| v.proposal.batches.iter())
+                    .fold(HashMap::<(Digest, WorkerId), u32>::new(), |mut map, digest| {
+                        *map.entry(*digest).or_default() += 1;
+                        map
+                    })
+                    .into_iter()
+                    .filter(|(_, count)| *count > num_nodes_threshold)
+                    .map(|(digest, _)| digest)
+                    .collect();
+
+                // Any batches that were included in our last proposal that do not make it to the next
+                // proposal will be put back into the batch pool. This prevents batches that have not
+                // been synced yet from ever getting into a ledger.
+                let to_queue = self.proposals.get(&self.node_id).unwrap().proposal.batches.iter()
+                    .filter(|batch| !new_proposal_set.contains(batch))
+                    .collect::<Vec<&(Digest, WorkerId)>>();
+                info!("Requeuing {:?} batches", to_queue.len());
+                self.batch_pool.extend(
+                    self.proposals.get(&self.node_id).unwrap().proposal.batches.iter()
+                        .filter(|batch| !new_proposal_set.contains(batch))
+                );
+                // let trunc_batch_set = Self::truncate_batchset(&new_proposal_set);
+                info!(
+                "Reproposing batch set w len: {:?}",
+                new_proposal_set.len()
+            );
+                self.propose(new_proposal_set).await;
+            }
+        }
+        /*if self.check_consensus() {
             info!("We have consensus!");
             self.build_ledger().await;
         } else {
@@ -227,6 +289,7 @@ impl Consensus {
                 .filter(|p| p.proposal.parent_id == self.latest_ledger.id)
                 // .filter(|p| p.proposal.round == self.round - 1)
                 .count();
+            info!("We have {:?} proposals for ledger {:?}", num_proposals_for_this_ledger, self.latest_ledger.id);
 
             if num_proposals_for_this_ledger < num_nodes_threshold as usize {
                 info!("We don't have enough proposals for child of ledger {:?}. Deferring to next round.", self.latest_ledger.id);
@@ -266,7 +329,7 @@ impl Consensus {
                 new_proposal_set.len()
             );
             self.propose(new_proposal_set).await;
-        }
+        }*/
     }
 
     fn truncate_batchset(batch_set: &HashSet<(Digest, WorkerId)>) -> Vec<String> {
@@ -277,7 +340,8 @@ impl Consensus {
         trunc_batch_set
     }
 
-    async fn propose(&mut self, batch_set: HashSet<(Digest, WorkerId)>) {
+    async fn propose(&mut self, mut batch_set: Vec<(Digest, WorkerId)>) {
+        batch_set.sort();
         let proposal = Proposal::new(
             self.round,
             self.latest_ledger.id(),
@@ -317,7 +381,40 @@ impl Consensus {
         }
     }
 
-    fn check_consensus(&self) -> bool {
+    fn check_consensus(&self) -> Option<Vec<(Digest, WorkerId)>> {
+       /* info!("Checking for consensus.");
+        let num_nodes_for_threshold = (self.committee.authorities.len() as f32 * 0.80).ceil() as u32;
+        info!("Need {:?} nodes to agree.", num_nodes_for_threshold);
+        let proposals_found: Vec<(Digest, u32)> = self.proposals.iter()
+            .fold(HashMap::<Digest, u32>::new(), |mut map, (_, proposal)| {
+                let digest = proposal.proposal.compute_batches_id();
+                *map.entry(digest).or_default() += 1;
+                map
+            })
+            .into_iter()
+            .filter(|e| e.1 >= num_nodes_for_threshold)
+            .collect();
+        if proposals_found.is_empty() {
+            info!("No consensus proposals found.");
+            return None;
+        } else {
+            if proposals_found.len() > 1 {
+                panic!("Multiple proposals reached consensus quorum.")
+            } else {
+                let consensus_proposal = proposals_found[0].0;
+                let our_proposal = self.proposals.get(&self.node_id)
+                    .expect("We did not propose anything the first round.");
+                return if consensus_proposal != our_proposal.proposal.compute_batches_id() {
+                    info!("The network agreed on a set of batches that were different than mine. Executing their ledger.");
+                    let p = self.proposals.iter()
+                        .find(|prop| prop.1.proposal.compute_batches_id() == consensus_proposal)
+                        .unwrap();
+                    Some(p.1.proposal.batches.clone())
+                } else {
+                    Some(our_proposal.proposal.batches.clone())
+                }
+            }
+        }*/
         // Find our proposal
         let our_proposal = self.proposals.get(&self.node_id)
             .expect("We did not propose anything the first round.");
@@ -333,13 +430,17 @@ impl Consensus {
 
         // If 80% or more of UNL nodes proposed the same batch set, we have reached consensus,
         // otherwise we need another round.
-        num_matching_sets >= num_nodes_for_threshold
+        return if num_matching_sets >= num_nodes_for_threshold {
+            Some(our_proposal.proposal.batches.clone())
+        } else {
+            None
+        }
     }
 
-    async fn build_ledger(&mut self) {
+    async fn build_ledger(&mut self, batches: Vec<(Digest, WorkerId)>) {
         self.state = ConsensusState::Executing;
 
-        let new_ledger = self.execute();
+        let new_ledger = self.execute(batches);
 
         let validation = Validation::new(
             new_ledger.seq(),
@@ -387,21 +488,19 @@ impl Consensus {
 
         info!("Did a new ledger {:?}. Num Batches {:?}", (self.latest_ledger.id, self.latest_ledger.seq()), self.latest_ledger.batch_set.len());
 
-        #[cfg(feature = "benchmark")]
+        /*#[cfg(feature = "benchmark")]
         for batch in &self.latest_ledger.batch_set {
             info!("Committed {:?} ", batch);
-        }
+        }*/
     }
 
-    fn execute(&self) -> Ledger {
+    fn execute(&self, batches: Vec<(Digest, WorkerId)>) -> Ledger {
         let mut new_ancestors = vec![self.latest_ledger.id()];
         new_ancestors.extend_from_slice(self.latest_ledger.ancestors.as_slice());
-        let our_proposal = self.proposals.get(&self.node_id)
-            .expect("Could not find our own proposal");
 
         // TODO: Do we need to store a Vec<Digest> in Ledger and sort batches here so that they
         //  yield the same ID on every validator?
-        let batches = our_proposal.proposal.batches.iter()
+        let batches = batches.iter()
             .map(|b| b.0)
             .collect();
         Ledger::new(
@@ -439,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_selection_selecting_parent() {
-        let mut logger = env_logger::Builder::from_env(Env::default().default_filter_or("info"));
+        /*let mut logger = env_logger::Builder::from_env(Env::default().default_filter_or("info"));
 
         logger.init();
 
@@ -497,7 +596,7 @@ mod tests {
 
         consensus.build_ledger().await;
 
-        consensus.on_timeout().await;
+        consensus.on_timeout().await;*/
         /*tx_primary_consensus.send(PrimaryConsensusMessage::Timeout).await.expect("");
         tx_primary_consensus.send(PrimaryConsensusMessage::Proposal(
             Proposal::new(

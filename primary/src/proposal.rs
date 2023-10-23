@@ -56,7 +56,7 @@ pub struct Proposal {
     pub round: ConsensusRound,
     pub parent_id: Digest,
     ledger_index: LedgerIndex,
-    pub batches: HashSet<(Digest, WorkerId)>,
+    pub batches: Vec<(Digest, WorkerId)>,
     pub node_id: PublicKey
 }
 
@@ -65,7 +65,7 @@ impl Proposal {
         round: ConsensusRound,
         parent_id: Digest,
         ledger_index: LedgerIndex,
-        batches: HashSet<(Digest, WorkerId)>,
+        batches: Vec<(Digest, WorkerId)>,
         node_id: PublicKey,
     ) -> Self {
         Proposal {
@@ -87,6 +87,10 @@ impl Proposal {
 
     pub fn compute_id(&self) -> Digest {
         bincode::serialize(&(&self.round, &self.parent_id, &self.ledger_index, &self.batches, &self.node_id)).unwrap().as_slice().digest()
+    }
+
+    pub fn compute_batches_id(&self) -> Digest {
+        bincode::serialize(&(&self.parent_id, &self.ledger_index, &self.batches)).unwrap().as_slice().digest()
     }
 }
 
