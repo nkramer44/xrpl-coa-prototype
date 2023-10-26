@@ -1,7 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 //use crate::error::{DagError, DagResult};
 
-use crate::primary::{PrimaryPrimaryMessage};
+use crate::primary::{LedgerOrValidation, PrimaryPrimaryMessage};
 use bytes::Bytes;
 use config::Committee;
 //use crypto::Hash as _;
@@ -39,8 +39,7 @@ pub struct Core {
     rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
     rx_stored_batches: Receiver<(Digest, WorkerId)>,
     rx_loopback_proposal: Receiver<SignedProposal>,
-    rx_loopback_validations: Receiver<SignedValidation>,
-    rx_loopback_ledgers: Receiver<Ledger>,
+    rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
     tx_own_ledgers: Sender<Ledger>,
     tx_proposal_waiter: Sender<CoreProposalWaiterMessage>,
 
@@ -62,8 +61,7 @@ impl Core {
         rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
         rx_stored_batches: Receiver<(Digest, WorkerId)>,
         rx_loopback_proposal: Receiver<SignedProposal>,
-        rx_loopback_validations: Receiver<SignedValidation>,
-        rx_loopback_ledgers: Receiver<Ledger>,
+        rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
         tx_own_ledgers: Sender<Ledger>,
         tx_proposal_waiter: Sender<CoreProposalWaiterMessage>,
     ) {
@@ -77,8 +75,7 @@ impl Core {
                 rx_consensus_primary,
                 rx_stored_batches,
                 rx_loopback_proposal,
-                rx_loopback_validations,
-                rx_loopback_ledgers,
+                rx_loopback_validations_ledgers,
                 tx_own_ledgers,
                 tx_proposal_waiter,
                 network: ReliableSender::new(),
@@ -178,10 +175,12 @@ impl Core {
                 Some(signed_proposal) = self.rx_loopback_proposal.recv() =>
                 self.process_proposal(signed_proposal).await,
 
-                Some(signed_validation) = self.rx_loopback_validations.recv() =>
-                self.process_validation(signed_validation).await,
-
-                Some(ledger) = self.rx_loopback_ledgers.recv() => self.process_ledger(ledger).await,
+                Some(ledger_or_validation) = self.rx_loopback_validations_ledgers.recv() => {
+                    match ledger_or_validation {
+                        LedgerOrValidation::Ledger(ledger) => self.process_ledger(ledger).await,
+                        LedgerOrValidation::Validation(validation) => self.process_validation(validation).await
+                    }
+                },
 
                 Some((batch, worker_id)) = self.rx_stored_batches.recv() => self.process_stored_batch(batch, worker_id).await,
 

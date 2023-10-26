@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
-use log::info;
+use log::{error, info};
 //use std::path::Ancestors;
 use serde::{Deserialize, Serialize};
 
@@ -63,9 +63,23 @@ impl xrpl_consensus_core::Ledger for Ledger {
                 return self.id();
             }
 
+            if seq == 0 {
+                return Ledger::make_genesis().id
+            }
+
             let diff = self.seq() - seq;
             // info!("Ledger {:?} ancestors: {:?}. Requested seq = {:?}", (self.id, self.seq), self.ancestors, seq);
-            return *self.ancestors.get(self.ancestors.len() - diff as usize - 1).unwrap();
+            let digest = self.ancestors.get(self.ancestors.len() - diff as usize - 1);
+            if digest.is_none() {
+                error!(
+                    "Ledger about to panic. id = {:?}, seq {:?}, ancestors: {:?}. Requested ancestor seq = {:?}",
+                    self.id,
+                    self.seq,
+                    self.ancestors,
+                    seq
+                );
+            }
+            return *digest.unwrap();
         }
 
         Digest::default()
