@@ -28,9 +28,9 @@ impl ConsensusRound {
     pub fn threshold(&self) -> f32 {
         match self.0 {
             0 => 0.5,
-            1 => 0.65,
+            1 => 0.60,
             2 => 0.70,
-            _ => 0.95
+            _ => 0.80
         }
     }
 }

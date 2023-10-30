@@ -22,7 +22,7 @@ use crate::{Ledger, SignedValidation};
 use crate::proposal::SignedProposal;
 
 /// The default channel capacity for each channel of the primary.
-pub const CHANNEL_CAPACITY: usize = 1_000;
+pub const CHANNEL_CAPACITY: usize = 10_000;
 
 /// The round number.
 pub type Round = u64;
