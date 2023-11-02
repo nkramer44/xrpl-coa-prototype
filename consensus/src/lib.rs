@@ -23,7 +23,7 @@ use crate::adaptor::ValidationsAdaptor;
 pub mod adaptor;
 
 pub const INITIAL_WAIT: Duration = Duration::from_secs(2);
-pub const MAX_PROPOSAL_SIZE: usize = 1_000_000;
+pub const MAX_PROPOSAL_SIZE: usize = 200_000;
 
 pub enum ConsensusState {
     NotSynced,

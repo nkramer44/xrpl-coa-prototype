@@ -34,6 +34,58 @@ pub enum CoreProposalWaiterMessage {
     NewLedger(Ledger),
 }
 
+struct Dependencies {
+    missing_counts : HashMap<Digest, usize>,
+    dependencies : HashMap<(Digest, WorkerId), Vec<Digest>>,
+}
+
+impl Dependencies {
+    pub fn new() -> Self {
+        Self {
+            missing_counts : HashMap::new(),
+            dependencies: HashMap::new(),
+        }
+    }
+
+    pub fn addDependencies(&mut self, missing : &Vec<(Digest, WorkerId)>, pid:&Digest){
+        info!("D-CHECK adding proposal {:?}, missing {}", pid, missing.len());
+        if ! self.missing_counts.contains_key(pid) {
+            self.missing_counts.insert(pid.clone(), missing.len());
+            for m in missing {
+                self.dependencies.entry(m.clone()).or_insert_with(Vec::new).push(pid.clone());
+            }
+        }
+    }
+
+    pub fn addBatches(&mut self, batches: &Vec<(Digest, WorkerId)>) -> Vec<Digest>{
+        let mut pids = Vec::new();
+        for b in batches {
+            match self.dependencies.remove(b) {
+                None => {}
+                Some(ps) => {
+                    for p in ps {
+                        match self.missing_counts.get_mut(&p){
+                            None => {
+                                error!("Dependencies error");
+                            }
+                            Some(c) => {
+                                *c = *c- 1;
+                                //debug!("D-CHECK {} has {} missing", p, *c);
+                                if *c == 0 {
+                                    self.missing_counts.remove(&p);
+                                    info!("D-CHECK Synced proposal {:?} should be delivered", p);
+                                    pids.push(p);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pids
+    }
+}
+
 pub struct ProposalWaiter {
     /// The name of this authority.
     name: PublicKey,
@@ -47,7 +99,7 @@ pub struct ProposalWaiter {
     tx_loopback_proposal: Sender<SignedProposal>,
     rx_from_core: Receiver<CoreProposalWaiterMessage>,
 
-    batch_cache: HashSet<Digest>,
+    batch_cache: HashSet<(Digest, WorkerId)>,
     to_acquire: VecDeque<(SignedProposal, u128)>,
 
     /// Network driver allowing to send messages.
@@ -55,7 +107,7 @@ pub struct ProposalWaiter {
 
     batch_requests: HashSet<Digest>, // TODO cleanup or not
     pending: HashSet<Digest>,
-
+    dependencies: Dependencies,
     //consensus_round: Arc<AtomicU64>,    //TODO not to acquire for old proposals
 }
 
@@ -84,6 +136,7 @@ impl ProposalWaiter {
                 network: SimpleSender::new(),
                 batch_requests: HashSet::new(),
                 pending: HashSet::new(),
+                dependencies: Dependencies::new(),
             }
                 .run()
                 .await;
@@ -121,8 +174,9 @@ impl ProposalWaiter {
                 Some(message) = self.rx_batches.recv() => {
                     match message {
                         Batches::Batches(batches) => {
-                            for (batch, _) in batches{
-                                self.batch_cache.insert(batch);
+                            self.dependencies.addBatches(&batches);
+                            for (batch, wid) in batches{
+                                self.batch_cache.insert((batch, wid));
                             }
                         }
                     }
@@ -132,15 +186,14 @@ impl ProposalWaiter {
                     //TODO verify sig
 
                     let batches = &signed_proposal.proposal.batches;
-
-                    let mut missing = HashMap::new();
-                    for (digest, worker_id) in batches.iter() {
-                        if ! self.batch_cache.contains(digest) {
-                            let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
+                    let mut missing = Vec::new();
+                    for batch in batches {
+                        if ! self.batch_cache.contains(batch) {
+                            let key = [batch.0.as_ref(), &batch.1.to_le_bytes()].concat();
                             match self.store.read(key).await {
                                 Ok(Some(_)) => {},
                                 Ok(None) => {
-                                    missing.insert(*digest, *worker_id);
+                                    missing.push(batch);
                                 },
                                 Err(e) => {
                                     error!("{}", e);
@@ -159,7 +212,7 @@ impl ProposalWaiter {
                         continue;
                     }
 
-                    debug!("Synching proposal {:?}, missing {}", signed_proposal, missing.len());
+                    debug!("Waiting proposal {:?}, missing {}", signed_proposal, missing.len());
                     let now = clock();
                     self.to_acquire.push_back((signed_proposal, now));
                 },
@@ -167,7 +220,7 @@ impl ProposalWaiter {
                 Some(message) = self.rx_from_core.recv() => {
                     match message {
                         CoreProposalWaiterMessage::NewLedger(ledger) => {
-                            for (batch, _) in ledger.batch_set{
+                            for batch in ledger.batch_set{
                                 //TODO same batch digest by different workers
                                 self.batch_cache.remove(&batch);
                             }
@@ -223,16 +276,14 @@ impl ProposalWaiter {
                             continue;
                         }
 
-                        //let now = Instant::now();
-
-                        let mut missing = HashMap::new();
-                        for (digest, worker_id) in batches.iter() {
-                            if ! self.batch_cache.contains(digest) {
-                                let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
+                        let mut missing = Vec::new();
+                        for batch in batches {
+                            if ! self.batch_cache.contains(batch) {
+                                let key = [batch.0.as_ref(), &batch.1.to_le_bytes()].concat();
                                 match self.store.read(key).await {
                                     Ok(Some(_)) => {},
                                     Ok(None) => {
-                                        missing.insert(*digest, *worker_id);
+                                        missing.push(*batch);
                                     },
                                     Err(e) => {
                                         error!("{}", e);
@@ -255,6 +306,9 @@ impl ProposalWaiter {
                             continue;
                         }
 
+                        debug!("Synching proposal {:?} {:?}, missing {}", proposal_id, signed_proposal, missing.len());
+                        self.dependencies.addDependencies(&missing, &proposal_id);
+
                         // Add the Proposal to the waiter pool. The waiter will return it to when all
                         // its parents are in the store.
                         let wait_for = missing
@@ -264,7 +318,7 @@ impl ProposalWaiter {
                                 (key.to_vec(), self.store.clone())
                             })
                             .collect();
-                        //let (tx_cancel, rx_cancel) = channel(1);
+
                         self.pending.insert(proposal_id);//, (round, tx_cancel));
                         let fut = Self::batch_waiter(wait_for, signed_proposal);//, rx_cancel);
                         waiting.push(fut);
@@ -301,16 +355,3 @@ impl ProposalWaiter {
 // TODO don't acquire for old (previous consensus session) proposals
 // TODO Cleanup internal state.
 // TODO retry
-
-// The commands that can be sent to the `Waiter`.
-// #[derive(Debug)]
-// pub enum ToWaiterMessage {
-//     NetworkProposal(SignedProposal),
-//     //SyncForValidation(Vec<Digest>, Validation),
-// }
-//
-// #[derive(Debug)]
-// pub enum FromWaiterMessage {
-//     VerifiedProposal(SignedProposal),
-//     //Validation(Validation),
-// }
