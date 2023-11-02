@@ -14,7 +14,7 @@ use xrpl_consensus_validations::arena_ledger_trie::ArenaLedgerTrie;
 
 use config::{Committee, WorkerId};
 use crypto::{Digest, PublicKey, SignatureService};
-use primary::{ConsensusPrimaryMessage, PrimaryConsensusMessage, PrimaryConsensusMessageData, SignedValidation, Validation};
+use primary::{ConsensusPrimaryMessage, PrimaryConsensusMessage, Batches, SignedValidation, Validation};
 use primary::Ledger;
 use primary::proposal::{ConsensusRound, Proposal, SignedProposal};
 
@@ -51,7 +51,7 @@ pub struct Consensus {
     signature_service: SignatureService,
 
     rx_primary: Receiver<PrimaryConsensusMessage>,
-    rx_primary_data: Receiver<PrimaryConsensusMessageData>,
+    rx_primary_data: Receiver<Batches>,
     tx_primary: Sender<ConsensusPrimaryMessage>,
 }
 
@@ -63,7 +63,7 @@ impl Consensus {
         adaptor: ValidationsAdaptor,
         clock: Arc<RwLock<<ValidationsAdaptor as Adaptor>::ClockType>>,
         rx_primary: Receiver<PrimaryConsensusMessage>,
-        rx_primary_data: Receiver<PrimaryConsensusMessageData>,
+        rx_primary_data: Receiver<Batches>,
         tx_primary: Sender<ConsensusPrimaryMessage>,
     ) {
         tokio::spawn(async move {
@@ -98,7 +98,7 @@ impl Consensus {
         adaptor: ValidationsAdaptor,
         clock: Arc<RwLock<<ValidationsAdaptor as Adaptor>::ClockType>>,
         rx_primary: Receiver<PrimaryConsensusMessage>,
-        rx_primary_data: Receiver<PrimaryConsensusMessageData>,
+        rx_primary_data: Receiver<Batches>,
         tx_primary: Sender<ConsensusPrimaryMessage>,
     ) -> Self {
         let mut rng = OsRng {};
@@ -127,12 +127,14 @@ impl Consensus {
             tokio::select! {
                 Some(message) = self.rx_primary_data.recv() => {
                     match message {
-                        PrimaryConsensusMessageData::Batch(batch) => {
+                        Batches::Batches(batches) => {
                             // Store any batches that come from the primary in batch_pool to be included
                             // in a future proposal.
                             // info!("Received batch {:?}.", batch.0);
-                            if !self.batch_pool.contains(&batch) {
-                                self.batch_pool.push_front(batch);
+                            for batch in batches {
+                                if !self.batch_pool.contains(&batch) {
+                                    self.batch_pool.push_front(batch);
+                                }
                             }
                         },
                     }

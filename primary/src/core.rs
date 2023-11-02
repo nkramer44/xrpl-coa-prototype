@@ -1,7 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 //use crate::error::{DagError, DagResult};
 
-use crate::primary::{LedgerOrValidation, PrimaryConsensusMessageData, PrimaryPrimaryMessage};
+use crate::primary::{LedgerOrValidation, Batches, PrimaryPrimaryMessage};
 use bytes::Bytes;
 use config::Committee;
 //use crypto::Hash as _;
@@ -33,12 +33,12 @@ pub struct Core {
     store: Store,
 
     /// The current consensus round (used for cleanup).
-    consensus_round: Arc<AtomicU64>, //TODO remove
+    //consensus_round: Arc<AtomicU64>, //TODO remove
 
     tx_primary_consensus: Sender<PrimaryConsensusMessage>,
-    tx_primary_consensus_data: Sender<PrimaryConsensusMessageData>,
+    //tx_primary_consensus_data: Sender<Batches>,
     rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
-    rx_stored_batches: Receiver<(Digest, WorkerId)>,
+    //rx_stored_batches: Receiver<(Digest, WorkerId)>,
     rx_loopback_proposal: Receiver<SignedProposal>,
     rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
     tx_own_ledgers: Sender<Ledger>,
@@ -58,11 +58,11 @@ impl Core {
         name: PublicKey,
         committee: Committee,
         store: Store,
-        consensus_round: Arc<AtomicU64>,
+        //consensus_round: Arc<AtomicU64>,
         tx_primary_consensus: Sender<PrimaryConsensusMessage>,
-        tx_primary_consensus_data: Sender<PrimaryConsensusMessageData>,
+        //tx_primary_consensus_data: Sender<Batches>,
         rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
-        rx_stored_batches: Receiver<(Digest, WorkerId)>,
+        //rx_stored_batches: Receiver<(Digest, WorkerId)>,
         rx_loopback_proposal: Receiver<SignedProposal>,
         rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
         tx_own_ledgers: Sender<Ledger>,
@@ -73,11 +73,11 @@ impl Core {
                 name,
                 committee,
                 store,
-                consensus_round,
+                //consensus_round,
                 tx_primary_consensus,
-                tx_primary_consensus_data,
+                //tx_primary_consensus_data,
                 rx_consensus_primary,
-                rx_stored_batches,
+                //rx_stored_batches,
                 rx_loopback_proposal,
                 rx_loopback_validations_ledgers,
                 tx_own_ledgers,
@@ -99,19 +99,19 @@ impl Core {
         self.timeout_count += 1;
     }
 
-    async fn process_stored_batch(&mut self, batch: Digest, worker_id: WorkerId) {
-        #[cfg(feature = "benchmark")]
-        info!("Created {:?}", batch);
-
-        self.tx_primary_consensus_data
-            .send(PrimaryConsensusMessageData::Batch((batch, worker_id)))
-            .await //TODO need to wait?
-            .expect("Failed to send workers' digests");
-        self.tx_proposal_waiter
-            .send(CoreProposalWaiterMessage::Batch(batch))
-            .await
-            .expect("cannot send workers' digests");
-    }
+    // async fn process_stored_batch(&mut self, batch: Digest, worker_id: WorkerId) {
+    //     #[cfg(feature = "benchmark")]
+    //     info!("Created {:?}", batch);
+    //
+    //     self.tx_primary_consensus_data
+    //         .send(Batches::Batch((batch, worker_id)))
+    //         .await //TODO need to wait?
+    //         .expect("Failed to send workers' digests");
+    //     self.tx_proposal_waiter
+    //         .send(CoreProposalWaiterMessage::Batch(batch))
+    //         .await
+    //         .expect("cannot send workers' digests");
+    // }
 
     async fn process_proposal(&mut self, proposal: SignedProposal) {
         //-> DagResult<()> {
@@ -188,7 +188,7 @@ impl Core {
                     }
                 },
 
-                Some((batch, worker_id)) = self.rx_stored_batches.recv() => self.process_stored_batch(batch, worker_id).await,
+                //Some((batch, worker_id)) = self.rx_stored_batches.recv() => self.process_stored_batch(batch, worker_id).await,
 
                 Some(cp_message) = self.rx_consensus_primary.recv() => {
                     match cp_message {

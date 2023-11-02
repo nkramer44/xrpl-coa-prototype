@@ -2,7 +2,7 @@
 use crate::error::{DagError, DagResult};
 use crate::primary::{PrimaryWorkerMessage};
 use bytes::Bytes;
-use config::{Committee};
+use config::{Committee, WorkerId};
 use crypto::{Digest, PublicKey};
 use futures::future::try_join_all;
 use futures::stream::futures_unordered::FuturesUnordered;
@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
-use crate::Ledger;
+use crate::{Batches, Ledger};
 use crate::proposal::{SignedProposal};
 
 const TIMER_RESOLUTION: u64 = 100;
@@ -30,7 +30,7 @@ fn clock() -> u128 {
 
 #[derive(Debug)]
 pub enum CoreProposalWaiterMessage {
-    Batch(Digest),
+    //Batch(Digest),
     NewLedger(Ledger),
 }
 
@@ -42,6 +42,7 @@ pub struct ProposalWaiter {
     /// The persistent storage.
     store: Store,
 
+    rx_batches: Receiver<Batches>,
     rx_network_proposal: Receiver<SignedProposal>,
     tx_loopback_proposal: Sender<SignedProposal>,
     rx_from_core: Receiver<CoreProposalWaiterMessage>,
@@ -64,6 +65,7 @@ impl ProposalWaiter {
         name: PublicKey,
         committee: Committee,
         store: Store,
+        rx_batches: Receiver<Batches>,
         rx_network_proposal: Receiver<SignedProposal>,
         tx_loopback_proposal: Sender<SignedProposal>,
         rx_from_core: Receiver<CoreProposalWaiterMessage>,
@@ -73,6 +75,7 @@ impl ProposalWaiter {
                 name,
                 committee,
                 store,
+                rx_batches,
                 rx_network_proposal,
                 tx_loopback_proposal,
                 rx_from_core,
@@ -115,6 +118,16 @@ impl ProposalWaiter {
 
         loop {
             tokio::select! {
+                Some(message) = self.rx_batches.recv() => {
+                    match message {
+                        Batches::Batches(batches) => {
+                            for (batch, _) in batches{
+                                self.batch_cache.insert(batch);
+                            }
+                        }
+                    }
+                },
+
                 Some(signed_proposal) = self.rx_network_proposal.recv() => {
                     //TODO verify sig
 
@@ -159,9 +172,9 @@ impl ProposalWaiter {
                                 self.batch_cache.remove(&batch);
                             }
                         },
-                        CoreProposalWaiterMessage::Batch(batch) => {
-                            self.batch_cache.insert(batch);
-                        }
+                        // CoreProposalWaiterMessage::Batch(batch) => {
+                        //     self.batch_cache.insert(batch);
+                        // }
                     }
                 },
 
@@ -187,6 +200,7 @@ impl ProposalWaiter {
                 },
 
                 () = &mut timer => {
+                    //debug!("TIMEOUT");
                     let now = clock();
                     loop{
                         let f = self.to_acquire.front();
@@ -277,7 +291,7 @@ impl ProposalWaiter {
                             //TODO understand the network topology
                         }
                     }
-
+                    //debug!("RESCHEDULE");
                     timer.as_mut().reset(Instant::now() + Duration::from_millis(TIMER_RESOLUTION));
                 }
             }

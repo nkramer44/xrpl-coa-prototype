@@ -17,6 +17,6 @@ mod validation_waiter;
 // #[path = "tests/common.rs"]
 // mod common;
 
-pub use crate::primary::{Primary, PrimaryWorkerMessage, Round, WorkerPrimaryMessage, PrimaryConsensusMessage, PrimaryConsensusMessageData, ConsensusPrimaryMessage};
+pub use crate::primary::{Primary, PrimaryWorkerMessage, Round, WorkerPrimaryMessage, PrimaryConsensusMessage, Batches, ConsensusPrimaryMessage};
 pub use crate::ledger::Ledger;
 pub use crate::validations::{SignedValidation, Validation};

@@ -62,8 +62,8 @@ pub enum PrimaryConsensusMessage {
 }
 
 #[derive(Debug)]
-pub enum PrimaryConsensusMessageData {
-    Batch((Digest, WorkerId))
+pub enum Batches {
+    Batches(Vec<(Digest, WorkerId)>)
 }
 
 #[derive(Debug)]
@@ -88,11 +88,11 @@ impl Primary {
         parameters: Parameters,
         store: Store,
         tx_primary_consensus: Sender<PrimaryConsensusMessage>,
-        tx_primary_consensus_data: Sender<PrimaryConsensusMessageData>,
+        tx_primary_consensus_data: Sender<Batches>,
         rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
     ) {
-        let (tx_worker_batches, rx_worker_batches) = channel::<(Digest, WorkerId)>(CHANNEL_CAPACITY);
-        let (tx_store_batches, rx_stored_batches) = channel(CHANNEL_CAPACITY);
+        let (tx_worker_batches, rx_worker_batches) = channel(CHANNEL_CAPACITY);
+        let (tx_proposal_waiter_batches, rx_proposal_waiter_batches) = channel(CHANNEL_CAPACITY);
 
         let (tx_network_proposals, rx_network_proposals) = channel(CHANNEL_CAPACITY);
         let (tx_network_validations, rx_network_validations) = channel(CHANNEL_CAPACITY);
@@ -110,7 +110,7 @@ impl Primary {
         let name = public_key;
 
         // Atomic variable use to synchronizer all tasks with the latest consensus round.
-        let consensus_round = Arc::new(AtomicU64::new(0));//TODO remove
+        //let consensus_round = Arc::new(AtomicU64::new(0));//TODO remove
 
         // Spawn the network receiver listening to messages from the other primaries.
         let mut address = committee
@@ -144,7 +144,7 @@ impl Primary {
             /* handler */
             WorkerReceiverHandler {
                 tx_worker_batches,
-                tx_store_batches,
+                //tx_store_batches,
             },
         );
         info!(
@@ -153,7 +153,7 @@ impl Primary {
         );
 
         // Receives batch digests from workers. They are only used to validate proposals.
-        PayloadReceiver::spawn(store.clone(), rx_worker_batches);
+        PayloadReceiver::spawn(store.clone(), rx_worker_batches, tx_proposal_waiter_batches, tx_primary_consensus_data);
 
         // The `Helper` is dedicated to reply to ledger requests from other primaries.
         Helper::spawn(committee.clone(), store.clone(), rx_ledger_requests);
@@ -163,6 +163,7 @@ impl Primary {
             committee.clone(),
             store.clone(),
             //consensus_round,
+            rx_proposal_waiter_batches,
             rx_network_proposals,
             tx_loopback_proposals,
             rx_core_to_proposal_waiter,
@@ -182,11 +183,11 @@ impl Primary {
             name,
             committee.clone(),
             store.clone(),
-            consensus_round.clone(),
+            //consensus_round.clone(),
             tx_primary_consensus,
-            tx_primary_consensus_data,
+            //tx_primary_consensus_data,
             rx_consensus_primary,
-            rx_stored_batches,
+            //rx_stored_batches,
             rx_loopback_proposals,
             rx_loopback_validations_ledgers,
             tx_own_ledgers,
@@ -254,7 +255,7 @@ impl MessageHandler for PrimaryReceiverHandler {
 #[derive(Clone)]
 struct WorkerReceiverHandler {
     tx_worker_batches: Sender<(Digest, WorkerId)>,
-    tx_store_batches: Sender<(Digest, WorkerId)>,
+//    tx_store_batches: Sender<(Digest, WorkerId)>,
 }
 
 #[async_trait]
@@ -279,11 +280,11 @@ impl MessageHandler for WorkerReceiverHandler {
         // };
         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
             WorkerPrimaryMessage::OurBatch(digest, worker_id) => {
-                self
-                    .tx_store_batches
-                    .send((digest.clone(), worker_id))
-                    .await
-                    .expect("Failed to send workers' digests");
+                // self
+                //     .tx_store_batches
+                //     .send((digest.clone(), worker_id))
+                //     .await
+                //     .expect("Failed to send workers' digests");
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))
@@ -291,11 +292,11 @@ impl MessageHandler for WorkerReceiverHandler {
                     .expect("Failed to send workers' digests");
             }
             WorkerPrimaryMessage::OthersBatch(digest, worker_id) => {
-                self
-                    .tx_store_batches
-                    .send((digest.clone(), worker_id))
-                    .await
-                    .expect("Failed to send workers' digests");
+                // self
+                //     .tx_store_batches
+                //     .send((digest.clone(), worker_id))
+                //     .await
+                //     .expect("Failed to send workers' digests");
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))
