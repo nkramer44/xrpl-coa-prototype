@@ -28,12 +28,6 @@ fn clock() -> u128 {
         .as_millis()
 }
 
-#[derive(Debug)]
-pub enum CoreProposalWaiterMessage {
-    //Batch(Digest),
-    NewLedger(Ledger),
-}
-
 struct Dependencies {
     missing_counts : HashMap<Digest, usize>,
     dependencies : HashMap<(Digest, WorkerId), Vec<Digest>>,
@@ -97,7 +91,7 @@ pub struct ProposalWaiter {
     rx_batches: Receiver<Batches>,
     rx_network_proposal: Receiver<SignedProposal>,
     tx_loopback_proposal: Sender<SignedProposal>,
-    rx_from_core: Receiver<CoreProposalWaiterMessage>,
+    rx_ledgers: Receiver<Vec<Ledger>>,
 
     batch_cache: HashSet<(Digest, WorkerId)>,
     to_acquire: VecDeque<(SignedProposal, u128)>,
@@ -108,7 +102,6 @@ pub struct ProposalWaiter {
     batch_requests: HashSet<Digest>, // TODO cleanup or not
     pending: HashSet<Digest>,
     dependencies: Dependencies,
-    //consensus_round: Arc<AtomicU64>,    //TODO not to acquire for old proposals
 }
 
 impl ProposalWaiter {
@@ -120,7 +113,7 @@ impl ProposalWaiter {
         rx_batches: Receiver<Batches>,
         rx_network_proposal: Receiver<SignedProposal>,
         tx_loopback_proposal: Sender<SignedProposal>,
-        rx_from_core: Receiver<CoreProposalWaiterMessage>,
+        rx_ledgers: Receiver<Vec<Ledger>>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -130,7 +123,7 @@ impl ProposalWaiter {
                 rx_batches,
                 rx_network_proposal,
                 tx_loopback_proposal,
-                rx_from_core,
+                rx_ledgers,//rx_from_core,
                 batch_cache: HashSet::new(),
                 to_acquire: VecDeque::new(),
                 network: SimpleSender::new(),
@@ -217,17 +210,11 @@ impl ProposalWaiter {
                     self.to_acquire.push_back((signed_proposal, now));
                 },
 
-                Some(message) = self.rx_from_core.recv() => {
-                    match message {
-                        CoreProposalWaiterMessage::NewLedger(ledger) => {
-                            for batch in ledger.batch_set{
-                                //TODO same batch digest by different workers
-                                self.batch_cache.remove(&batch);
-                            }
-                        },
-                        // CoreProposalWaiterMessage::Batch(batch) => {
-                        //     self.batch_cache.insert(batch);
-                        // }
+                Some(ledgers) = self.rx_ledgers.recv() => {
+                    for l in ledgers{
+                        for batch in l.batch_set{
+                            self.batch_cache.remove(&batch);
+                        }
                     }
                 },
 

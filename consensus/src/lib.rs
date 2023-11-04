@@ -468,8 +468,10 @@ impl Consensus {
         info!("Did a new ledger {:?}. Num Batches {:?}", (self.latest_ledger.id, self.latest_ledger.seq()), self.latest_ledger.batch_set.len());
 
         #[cfg(feature = "benchmark")]
-        for batch in &self.latest_ledger.batch_set {
-            info!("Committed {:?} ", batch);
+        for (batch, _) in &self.latest_ledger.batch_set {
+            if *batch.0.get(0).unwrap() == 0 as u8 {
+                info!("Committed {:?} ", batch);
+            }
         }
     }
 

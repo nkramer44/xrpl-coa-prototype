@@ -1,17 +1,13 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use log::{error, info};
-// use futures::stream::futures_unordered::FuturesUnordered;
-// use futures::stream::StreamExt as _;
-// use log::error;
-// use serde::Serialize;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
-use xrpl_consensus_core::Validation;
+use xrpl_consensus_core::{LedgerIndex, Validation};
 use config::Committee;
 use crypto::{Digest, PublicKey};
 use network::SimpleSender;
@@ -28,15 +24,96 @@ fn clock() -> u128 {
         .as_millis()
 }
 
-// #[derive(Debug)]
-// pub enum ToWaiterMessage {
-//     NetworkValidation(SignedValidation),
-//     NetworkLedger(Ledger),
-// }
+
+struct LedgerMaster {
+    //tree : HashMap<LedgerIndex, HashMap<Digest, (Option<Ledger>, Vec<SignedValidation>)>>,
+    tx_full_validated_ledgers: Sender<Vec<Ledger>>,
+    index_to_hash: HashMap<LedgerIndex, HashSet<Digest>>,
+    //TODO
+    hash_to_ledger: HashMap<Digest, Ledger>,
+    hash_to_validators: HashMap<Digest, HashSet<PublicKey>>,
+    fully_validated: LedgerIndex,
+    pub quorum: usize,
+}
+
+impl LedgerMaster {
+    pub fn new(tx_full_validated_ledgers: Sender<Vec<Ledger>>,
+               quorum: usize) -> Self {
+        Self {
+            tx_full_validated_ledgers,
+            index_to_hash: HashMap::new(),
+            hash_to_ledger: HashMap::new(),
+            hash_to_validators: HashMap::new(),
+            fully_validated: 0,
+            quorum,
+        }
+    }
+
+    async fn check_fully_validatored(&mut self, lsqn: LedgerIndex, lid: Digest) {
+        let full = match self.hash_to_validators.get(&lid) {
+            Some(validators) => { validators.len() >= self.quorum },
+            None => false,
+        };
+
+        if full {
+            let mut lsqn = lsqn;
+            let mut lid = &lid;
+            let mut hashes = Vec::new();
+            let need = (lsqn - self.fully_validated) as usize;
+            while lsqn > self.fully_validated {
+                match self.hash_to_ledger.get(&lid) {
+                    None => {
+                        break;
+                    }
+                    Some(l) => {
+                        hashes.push(lid.clone());
+                        lsqn -= 1;
+                        lid = &l.ancestors[0];
+                    }
+                }
+            }
+
+            if hashes.len() == need {
+                self.fully_validated += need as u32;
+                let mut ledgers: Vec<Ledger> = Vec::new();
+                while !hashes.is_empty() {
+                    let lid = hashes.pop().unwrap();
+                    ledgers.push(self.hash_to_ledger.remove(&lid).unwrap());
+                }
+                self.tx_full_validated_ledgers.send(ledgers).await;
+            }
+        }
+    }
+
+    pub fn add_ledger(&mut self, l: Ledger) {//} -> Vec<Ledger> {
+        let lsqn = l.seq;
+        if lsqn <= self.fully_validated {
+            ()
+        }
+        let lid = l.id.clone();
+        if !self.hash_to_ledger.contains_key(&lid) {
+            self.hash_to_ledger.insert(lid.clone(), l);
+        }
+
+        self.check_fully_validatored(lsqn, lid);
+    }
+
+    pub fn add_validation(&mut self, v: &SignedValidation) {
+        let lsqn = v.seq();
+        if lsqn <= self.fully_validated {
+            ()
+        }
+        let lid = v.ledger_id();
+        self.hash_to_validators.entry(lid).or_insert_with(HashSet::new).insert(v.validation.node_id);
+
+        self.check_fully_validatored(lsqn, lid);
+    }
+}
 
 /// Waits to receive all the ancestors of a Validation before looping it back to the `Core`
 /// for further processing.
 pub struct ValidationWaiter {
+    ledger_master: LedgerMaster,
     name: PublicKey,
     committee: Committee,
     store: Store,
@@ -44,6 +121,7 @@ pub struct ValidationWaiter {
     rx_network_ledgers: Receiver<Ledger>,
     tx_loopback_validations_ledgers: Sender<LedgerOrValidation>,
     rx_own_ledgers: Receiver<Ledger>,
+
     to_acquire: VecDeque<(SignedValidation, u128)>,
     validation_dependencies: HashMap<Digest, Vec<SignedValidation>>,
     ledger_dependencies: HashMap<Digest, (Vec<Ledger>, PublicKey)>, // contains pending acquires
@@ -61,9 +139,13 @@ impl ValidationWaiter {
         rx_network_ledgers: Receiver<Ledger>,
         tx_loopback_validations_ledgers: Sender<LedgerOrValidation>,
         rx_own_ledgers: Receiver<Ledger>,
+        tx_full_validated_ledgers: Sender<Vec<Ledger>>,
     ) {
         tokio::spawn(async move {
             Self {
+                ledger_master: LedgerMaster::new(
+                    tx_full_validated_ledgers,
+                    (committee.authorities.len() as f32 * 0.80).ceil() as usize, ),
                 name,
                 committee,
                 store,
@@ -113,11 +195,6 @@ impl ValidationWaiter {
             Some((children, _)) => {
                 for ledger in children.into_iter() {
                     self.store_ledger(ledger, false).await;
-
-                    // self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
-                    // self.tx_loopback_ledgers.send(ledger.clone()).await.expect("TODO: panic message");
-                    // self.try_deliver(&ledger.id).await;
-                    // self.store_children(&ledger.id).await;
                 }
             }
             None => {}
@@ -145,10 +222,6 @@ impl ValidationWaiter {
         match self.store.read(parent.to_vec()).await {
             Ok(Some(_)) => {
                 self.store_ledger(ledger, false).await;
-                // self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
-                // self.tx_loopback_ledgers.send(ledger.clone()).await.expect("TODO: panic message");
-                // self.try_deliver(&ledger.id).await;
-                // self.store_children(&ledger.id).await;
                 return None;
             }
             Ok(None) => {
@@ -164,10 +237,6 @@ impl ValidationWaiter {
                     ledgers.push(ledger);
                     self.ledger_dependencies.insert(parent.clone(), (ledgers, pk.clone()));
                 }
-                // match entry {
-                //     Some((ledgers, _)) => ledgers.push(ledger),
-                //     None => self.ledger_dependencies.insert(parent.clone(), (Vec[ledger], pk.clone())),
-                // };
                 return Some((parent, pk));
             }
             Err(e) => {
@@ -180,24 +249,15 @@ impl ValidationWaiter {
     async fn run(&mut self) {
         let timer = sleep(Duration::from_millis(TIMER_RESOLUTION));
         tokio::pin!(timer);
-
-        // let acquire = async move | digest : Digest, pk : PublicKey | {
-        //     let address = self.committee
-        //         .primary(&pk)
-        //         .expect("Author is not in the committee")
-        //         .primary_to_primary;
-        //     let message = PrimaryPrimaryMessage::LedgerRequest(Vec[digest],pk);
-        //     let bytes = bincode::serialize(&message)
-        //         .expect("Failed to serialize batch sync request");
-        //     self.network.send(address, Bytes::from(bytes)).await;
-        // };
+        info!("quorum {}", self.ledger_master.quorum);
 
         loop {
-
             tokio::select! {
                 Some(signed_validation) = self.rx_network_validations.recv() => {
                     //TODO verify sig
                     // info!("Waiter Received validation for ledger {:?}", signed_validation.validation.ledger_id);
+                    self.ledger_master.add_validation(&signed_validation);
+
                     let ledger_id = signed_validation.validation.ledger_id;
                     match self.store.read(ledger_id.to_vec()).await{
                         Ok(Some(_)) => {
@@ -219,6 +279,8 @@ impl ValidationWaiter {
                 Some(ledger) = self.rx_network_ledgers.recv() => {
                     //TODO verify ledger
                     info!("Received ledger {:?} from the network.", ledger.id);
+                    self.ledger_master.add_ledger(ledger.clone());
+
                     match self.try_store_ledger(ledger).await {
                         Some((digest, pk)) => {
                             // acquire(digest, pk).await;
@@ -240,10 +302,8 @@ impl ValidationWaiter {
                 Some(ledger) = self.rx_own_ledgers.recv() => {
                     //TODO check parent exist in DB
                     info!("Waiter got our own ledger {:?}", ledger.id);
+                    self.ledger_master.add_ledger(ledger.clone());
                     self.store_ledger(ledger, true).await;
-                    // self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
-                    // self.try_deliver(&ledger.id).await;
-                    // self.store_children(&ledger.id).await;
                 },
 
                 () = &mut timer => {
@@ -282,7 +342,6 @@ impl ValidationWaiter {
                                 .expect("Failed to serialize batch sync request");
                                 info!("Sending LedgerRequest to {:?} for ledger {:?}", pk, digest);
                                 self.network.send(address, Bytes::from(bytes)).await;
-                                //                                        acquire(digest, pk).await;
                             }
                         }
                     }

@@ -14,7 +14,6 @@ use log::info;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -102,15 +101,12 @@ impl Primary {
         let (tx_loopback_proposals, rx_loopback_proposals) = channel(CHANNEL_CAPACITY);
         let (tx_loopback_validations_ledgers, rx_loopback_validations_ledgers) = channel(CHANNEL_CAPACITY);
 
-        let (tx_core_to_proposal_waiter, rx_core_to_proposal_waiter) = channel(CHANNEL_CAPACITY);
+        let (tx_full_validated_ledgers, rx_full_validated_ledgers) = channel(CHANNEL_CAPACITY);
         let (tx_own_ledgers, rx_own_ledgers) = channel(CHANNEL_CAPACITY);
 
         parameters.log();
 
         let name = public_key;
-
-        // Atomic variable use to synchronizer all tasks with the latest consensus round.
-        //let consensus_round = Arc::new(AtomicU64::new(0));//TODO remove
 
         // Spawn the network receiver listening to messages from the other primaries.
         let mut address = committee
@@ -162,11 +158,10 @@ impl Primary {
             name,
             committee.clone(),
             store.clone(),
-            //consensus_round,
             rx_proposal_waiter_batches,
             rx_network_proposals,
             tx_loopback_proposals,
-            rx_core_to_proposal_waiter,
+            rx_full_validated_ledgers,
         );
 
         ValidationWaiter::spawn(
@@ -177,21 +172,18 @@ impl Primary {
             rx_network_ledgers,
             tx_loopback_validations_ledgers,
             rx_own_ledgers,
+            tx_full_validated_ledgers,
         );
 
         Core::spawn(
             name,
             committee.clone(),
             store.clone(),
-            //consensus_round.clone(),
             tx_primary_consensus,
-            //tx_primary_consensus_data,
             rx_consensus_primary,
-            //rx_stored_batches,
             rx_loopback_proposals,
             rx_loopback_validations_ledgers,
             tx_own_ledgers,
-            tx_core_to_proposal_waiter,
         );
 
         // NOTE: This log entry is used to compute performance.
@@ -210,7 +202,6 @@ impl Primary {
 /// Defines how the network receiver handles incoming primary messages.
 #[derive(Clone)]
 struct PrimaryReceiverHandler {
-    // tx_primary_messages: Sender<PrimaryPrimaryMessage>,
     tx_network_proposals: Sender<SignedProposal>,
     tx_network_validations: Sender<SignedValidation>,
     tx_network_ledgers: Sender<Ledger>,
@@ -265,26 +256,8 @@ impl MessageHandler for WorkerReceiverHandler {
         _writer: &mut Writer,
         serialized: Bytes,
     ) -> Result<(), Box<dyn Error>> {
-
-        // let p  = async move |digest : Digest, worker_id: WorkerId| {
-        //     self
-        //         .tx_store_batches
-        //         .send((digest.clone(), worker_id))
-        //         .await
-        //         .expect("Failed to send workers' digests");
-        //     self
-        //         .tx_worker_batches
-        //         .send((digest, worker_id))
-        //         .await
-        //         .expect("Failed to send workers' digests");
-        // };
         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
             WorkerPrimaryMessage::OurBatch(digest, worker_id) => {
-                // self
-                //     .tx_store_batches
-                //     .send((digest.clone(), worker_id))
-                //     .await
-                //     .expect("Failed to send workers' digests");
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))
@@ -292,11 +265,6 @@ impl MessageHandler for WorkerReceiverHandler {
                     .expect("Failed to send workers' digests");
             }
             WorkerPrimaryMessage::OthersBatch(digest, worker_id) => {
-                // self
-                //     .tx_store_batches
-                //     .send((digest.clone(), worker_id))
-                //     .await
-                //     .expect("Failed to send workers' digests");
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))

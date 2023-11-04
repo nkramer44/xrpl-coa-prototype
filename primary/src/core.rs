@@ -4,19 +4,14 @@
 use crate::primary::{LedgerOrValidation, Batches, PrimaryPrimaryMessage};
 use bytes::Bytes;
 use config::Committee;
-//use crypto::Hash as _;
-use crypto::{Digest, PublicKey};
+use crypto::{PublicKey};
 use log::{debug, info};
 use network::{CancelHandler, ReliableSender};
-use std::sync::atomic::{AtomicU64};
-use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
 use crate::{ConsensusPrimaryMessage, Ledger, PrimaryConsensusMessage, SignedValidation};
-use config::WorkerId;
 use crate::proposal::{SignedProposal};
-use crate::proposal_waiter::CoreProposalWaiterMessage;
 
 // #[cfg(test)]
 // #[path = "tests/core_tests.rs"]
@@ -32,17 +27,11 @@ pub struct Core {
     /// The persistent storage.
     store: Store,
 
-    /// The current consensus round (used for cleanup).
-    //consensus_round: Arc<AtomicU64>, //TODO remove
-
     tx_primary_consensus: Sender<PrimaryConsensusMessage>,
-    //tx_primary_consensus_data: Sender<Batches>,
     rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
-    //rx_stored_batches: Receiver<(Digest, WorkerId)>,
     rx_loopback_proposal: Receiver<SignedProposal>,
     rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
     tx_own_ledgers: Sender<Ledger>,
-    tx_proposal_waiter: Sender<CoreProposalWaiterMessage>,
 
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
@@ -58,30 +47,22 @@ impl Core {
         name: PublicKey,
         committee: Committee,
         store: Store,
-        //consensus_round: Arc<AtomicU64>,
         tx_primary_consensus: Sender<PrimaryConsensusMessage>,
-        //tx_primary_consensus_data: Sender<Batches>,
         rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
-        //rx_stored_batches: Receiver<(Digest, WorkerId)>,
         rx_loopback_proposal: Receiver<SignedProposal>,
         rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
         tx_own_ledgers: Sender<Ledger>,
-        tx_proposal_waiter: Sender<CoreProposalWaiterMessage>,
     ) {
         tokio::spawn(async move {
             Self {
                 name,
                 committee,
                 store,
-                //consensus_round,
                 tx_primary_consensus,
-                //tx_primary_consensus_data,
                 rx_consensus_primary,
-                //rx_stored_batches,
                 rx_loopback_proposal,
                 rx_loopback_validations_ledgers,
                 tx_own_ledgers,
-                tx_proposal_waiter,
                 network: ReliableSender::new(),
                 cancel_handlers: vec![],
                 timeout_count: 0,
@@ -98,20 +79,6 @@ impl Core {
             .expect("Failed to send timeout");
         self.timeout_count += 1;
     }
-
-    // async fn process_stored_batch(&mut self, batch: Digest, worker_id: WorkerId) {
-    //     #[cfg(feature = "benchmark")]
-    //     info!("Created {:?}", batch);
-    //
-    //     self.tx_primary_consensus_data
-    //         .send(Batches::Batch((batch, worker_id)))
-    //         .await //TODO need to wait?
-    //         .expect("Failed to send workers' digests");
-    //     self.tx_proposal_waiter
-    //         .send(CoreProposalWaiterMessage::Batch(batch))
-    //         .await
-    //         .expect("cannot send workers' digests");
-    // }
 
     async fn process_proposal(&mut self, proposal: SignedProposal) {
         //-> DagResult<()> {
@@ -168,7 +135,6 @@ impl Core {
 
     async fn process_own_ledger(&mut self, ledger: Ledger) {
         self.tx_own_ledgers.send(ledger.clone()).await.expect("cannot send self ledger to waiter");
-        self.tx_proposal_waiter.send(CoreProposalWaiterMessage::NewLedger(ledger)).await.expect("cannot send self ledger to waiter");
     }
 
     // Main loop listening to incoming messages.
@@ -187,8 +153,6 @@ impl Core {
                         LedgerOrValidation::Validation(validation) => self.process_validation(validation).await
                     }
                 },
-
-                //Some((batch, worker_id)) = self.rx_stored_batches.recv() => self.process_stored_batch(batch, worker_id).await,
 
                 Some(cp_message) = self.rx_consensus_primary.recv() => {
                     match cp_message {
