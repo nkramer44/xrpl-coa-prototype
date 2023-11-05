@@ -8,7 +8,7 @@ use log::{error, info, warn};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use tokio::sync::mpsc::{Receiver, Sender};
-use xrpl_consensus_core::{Ledger as LedgerTrait, NetClock};
+use xrpl_consensus_core::{Ledger as LedgerTrait, LedgerIndex, NetClock};
 use xrpl_consensus_validations::{Adaptor, ValidationError, ValidationParams, Validations};
 use xrpl_consensus_validations::arena_ledger_trie::ArenaLedgerTrie;
 
@@ -49,6 +49,8 @@ pub struct Consensus {
     validations: Validations<ValidationsAdaptor, ArenaLedgerTrie<Ledger>>,
     validation_cookie: u64,
     signature_service: SignatureService,
+    progress: HashMap<LedgerIndex, HashSet<PublicKey>>,
+    //TODO cleanup, safe and simple to clean if knows when ledgers are fully validated
 
     rx_primary: Receiver<PrimaryConsensusMessage>,
     rx_primary_data: Receiver<Batches>,
@@ -82,6 +84,7 @@ impl Consensus {
                 validations: Validations::new(ValidationParams::default(), adaptor, clock),
                 validation_cookie: rng.next_u64(),
                 signature_service,
+                progress: HashMap::new(),
                 rx_primary,
                 rx_primary_data,
                 tx_primary,
@@ -116,6 +119,7 @@ impl Consensus {
             validations: Validations::new(ValidationParams::default(), adaptor, clock),
             validation_cookie: rng.next_u64(),
             signature_service,
+            progress: HashMap::new(),
             rx_primary,
             rx_primary_data,
             tx_primary,
@@ -182,7 +186,7 @@ impl Consensus {
                     Entry::Occupied(mut proposals) => {
                         match proposals.get_mut().entry(self.node_id) {
                             Entry::Occupied(proposal) => {
-                                info!("adjust pool adding {:?} proposal batches", proposal.get().proposal.batches.len());
+                                info!("adjust pool, adding {:?} proposal batches", proposal.get().proposal.batches.len());
                                 self.batch_pool.extend(proposal.get().proposal.batches.iter());
                             }
                             Entry::Vacant(_) => {}
@@ -195,15 +199,17 @@ impl Consensus {
                 //by current design (oct 31, 2023), the node can be off by one ledger, not more
 
                 //put back batches in the ledgers on the wrong branch
-                info!("adjust pool adding {:?} ledger batches", self.latest_ledger.batch_set.len());
+                info!("adjust pool, adding {:?} ledger batches", self.latest_ledger.batch_set.len());
                 self.batch_pool.extend(self.latest_ledger.batch_set.iter());
 
                 //latest's parent is the common ancestor of the branches
                 let common_ancestor = self.latest_ledger.ancestors[0].clone();
+                info!("adjust pool, common_ancestor {:?} ", common_ancestor);
                 //find out batches in the ledgers on the right branch, and take them out
                 let mut l = self.validations.adaptor_mut().acquire(&preferred_id).await
                     .expect("ValidationsAdaptor did not have a ledger in cache.");
                 while l.id != common_ancestor {
+                    info!("adjust pool, ledger on preferred branch {:?} ", l.id);
                     l.batch_set.iter().for_each(|x| {self.negative_pool.insert(x.clone());});
                     l = self.validations.adaptor_mut().acquire(&l.ancestors[0]).await
                     .expect("ValidationsAdaptor did not have a ledger in cache.");
@@ -393,11 +399,29 @@ impl Consensus {
 
                 // Determine the number of nodes that need to agree with our proposal to reach consensus
                 // by multiplying the number of validators in our UNL by 0.80 and taking the ceiling.
-                let num_nodes_for_threshold = (self.committee.authorities.len() as f32 * 0.80).ceil() as usize;
+                let mut too_fast: HashSet<&PublicKey> = HashSet::new();
+                self.progress.iter()
+                    .filter(|(r, _)| **r > self.latest_ledger.seq)
+                    .for_each(|(_, pks)| too_fast.extend(pks.iter()));
+
+                let too_slow: HashSet<&PublicKey> = if our_proposal.proposal.round > ConsensusRound::from(20) {
+                    let slow_cut_off = our_proposal.proposal.round - 20;//TODO 20 seconds?
+                    proposals.iter()
+                        .filter(|(_, prop)| prop.proposal.round < slow_cut_off)
+                        .map(|(pk, _)| pk).collect()
+                } else {
+                    HashSet::new()
+                };
+
+                let normal : HashSet<&PublicKey> = self.committee.authorities.iter()
+                    .filter(|(pk, _)| !(too_fast.contains(pk) || too_slow.contains(pk)))
+                    .map(|(pk, _)| pk).collect();
+
+                let num_nodes_for_threshold = (normal.len() as f32 * 0.80).ceil() as usize;
 
                 // Determine how many proposals have the same set of batches as us.
                 let num_matching_sets = proposals.iter()
-                    .filter(|p| p.1.proposal.batches == our_proposal.proposal.batches)
+                    .filter(|(pk, prop)| normal.contains(pk) && prop.proposal.batches == our_proposal.proposal.batches)
                     .count();
 
                 // If 80% or more of UNL nodes proposed the same batch set, we have reached consensus,
@@ -478,6 +502,7 @@ impl Consensus {
     fn execute(&self) -> Ledger {
         let mut new_ancestors = self.latest_ledger.ancestors.clone();
         new_ancestors.push(self.latest_ledger.id());
+        assert!(new_ancestors[0] == self.latest_ledger.id());
         /*let mut new_ancestors = vec![self.latest_ledger.id()];
         new_ancestors.extend_from_slice(self.latest_ledger.ancestors.as_slice());*/
         //TODO assuming we proposed
@@ -505,6 +530,7 @@ impl Consensus {
 
     async fn process_validation(&mut self, validation: SignedValidation) {
         info!("Received validation from {:?} for ({:?}, {:?})", validation.validation.node_id, validation.validation.ledger_id, validation.validation.seq);
+        self.progress.entry(validation.validation.seq).or_insert_with(HashSet::new).insert(validation.validation.node_id);
         if let Err(e) = self.validations.try_add(&validation.validation.node_id, &validation).await {
             error!("{:?} could not be added. Error: {:?}", validation, e);
         }
