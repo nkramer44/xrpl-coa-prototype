@@ -171,7 +171,7 @@ impl Consensus {
     async fn on_timeout(&mut self) {
         if let Some((preferred_seq, preferred_id)) = self.validations.get_preferred(&self.latest_ledger) {
             if preferred_id != self.latest_ledger.id() {
-                if self.latest_ledger.ancestors[0] == preferred_id {
+                if *self.latest_ledger.ancestors.last().unwrap() == preferred_id {
                     error!("We just switched to {:?}'s parent {:?}", self.latest_ledger.id, preferred_id);
                 }
                 warn!(
@@ -203,7 +203,7 @@ impl Consensus {
                 self.batch_pool.extend(self.latest_ledger.batch_set.iter());
 
                 //latest's parent is the common ancestor of the branches
-                let common_ancestor = self.latest_ledger.ancestors[0].clone();
+                let common_ancestor = self.latest_ledger.ancestors.last().unwrap().clone();
                 info!("adjust pool, common_ancestor {:?} ", common_ancestor);
                 //find out batches in the ledgers on the right branch, and take them out
                 let mut l = self.validations.adaptor_mut().acquire(&preferred_id).await
@@ -211,7 +211,7 @@ impl Consensus {
                 while l.id != common_ancestor {
                     info!("adjust pool, ledger on preferred branch {:?} ", l.id);
                     l.batch_set.iter().for_each(|x| {self.negative_pool.insert(x.clone());});
-                    l = self.validations.adaptor_mut().acquire(&l.ancestors[0]).await
+                    l = self.validations.adaptor_mut().acquire(&l.ancestors.last().unwrap()).await
                     .expect("ValidationsAdaptor did not have a ledger in cache.");
                 }
                 self.batch_pool = self.batch_pool.iter()
@@ -502,7 +502,7 @@ impl Consensus {
     fn execute(&self) -> Ledger {
         let mut new_ancestors = self.latest_ledger.ancestors.clone();
         new_ancestors.push(self.latest_ledger.id());
-        assert!(new_ancestors[0] == self.latest_ledger.id());
+        //assert!(new_ancestors[0] == self.latest_ledger.id());
         /*let mut new_ancestors = vec![self.latest_ledger.id()];
         new_ancestors.extend_from_slice(self.latest_ledger.ancestors.as_slice());*/
         //TODO assuming we proposed

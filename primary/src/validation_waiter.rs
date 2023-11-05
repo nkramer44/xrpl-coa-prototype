@@ -68,7 +68,7 @@ impl LedgerMaster {
                     Some(l) => {
                         hashes.push(lid.clone());
                         lsqn -= 1;
-                        lid = &l.ancestors[0];
+                        lid = &l.ancestors.last().unwrap();
                     }
                 }
             }
