@@ -50,6 +50,8 @@ pub struct Consensus {
     validation_cookie: u64,
     signature_service: SignatureService,
     progress: HashMap<LedgerIndex, HashSet<PublicKey>>,
+    freshness: HashMap<PublicKey, u32>,
+    timer_count: u32,
     //TODO cleanup, safe and simple to clean if knows when ledgers are fully validated
 
     rx_primary: Receiver<PrimaryConsensusMessage>,
@@ -85,6 +87,8 @@ impl Consensus {
                 validation_cookie: rng.next_u64(),
                 signature_service,
                 progress: HashMap::new(),
+                freshness: HashMap::new(),
+                timer_count: 0,
                 rx_primary,
                 rx_primary_data,
                 tx_primary,
@@ -120,6 +124,8 @@ impl Consensus {
             validation_cookie: rng.next_u64(),
             signature_service,
             progress: HashMap::new(),
+            freshness: HashMap::new(),
+            timer_count: 0,
             rx_primary,
             rx_primary_data,
             tx_primary,
@@ -127,6 +133,11 @@ impl Consensus {
     }
 
     async fn run(&mut self) {
+        let mut pks : Vec<PublicKey> = self.committee.authorities.iter().map(|(pk, _)| (*pk).clone()).collect();
+        pks.into_iter().for_each(|(pk)| {
+            self.freshness.insert(pk, 0);
+        });
+
         loop {
             tokio::select! {
                 Some(message) = self.rx_primary_data.recv() => {
@@ -148,6 +159,7 @@ impl Consensus {
                     match message {
                         PrimaryConsensusMessage::Timeout(c) => {
                             info!("Received Timeout event, count {}", c);
+                            self.timer_count = c;
                             self.on_timeout().await;
                         },
                         PrimaryConsensusMessage::Proposal(proposal) => {
@@ -295,6 +307,8 @@ impl Consensus {
 
             let num_proposals_for_this_ledger = proposals.len();
 
+            //TODO check rippled logic for reducing the number of proposals required
+
             if num_proposals_for_this_ledger < num_nodes_threshold as usize {
                 info!("We don't have consensus :( and We don't have enough proposals for child of ledger {:?}, need {}, have {}. Deferring to next round.",
                     self.latest_ledger.id, num_nodes_threshold, num_proposals_for_this_ledger);
@@ -364,6 +378,7 @@ impl Consensus {
 
     fn on_proposal_received(&mut self, proposal: SignedProposal) {
         info!("Received new proposal: {:?}", proposal);
+        *self.freshness.get_mut(&proposal.proposal.node_id).unwrap() = self.timer_count;
         // The Primary will check the signature and make sure the proposal comes from
         // someone in our UNL before sending it to Consensus, therefore we do not need to
         // check here again. Additionally, the Primary will delay sending us a proposal until
@@ -390,6 +405,27 @@ impl Consensus {
         }
     }
 
+    fn get_normal_validators<'a>(&'a self) -> HashSet<&'a PublicKey> {
+        let mut too_fast: HashSet<&PublicKey> = HashSet::new();
+        self.progress.iter()
+            .filter(|(r, _)| **r > self.latest_ledger.seq)
+            .for_each(|(_, pks)| too_fast.extend(pks.iter()));
+
+        let too_slow: HashSet<&PublicKey> = if self.timer_count > 20 {
+            let slow_cut_off = self.timer_count - 20;//TODO 20 seconds?
+            self.freshness.iter()
+                .filter(|&(_, &last_seen)| last_seen <= slow_cut_off)
+                .map(|(pk, _)| pk).collect()
+        } else {
+            HashSet::new()
+        };
+
+        let normal : HashSet<&PublicKey> = self.committee.authorities.iter()
+            .filter(|(pk, _)| !(too_fast.contains(pk) || too_slow.contains(pk)))
+            .map(|(pk, _)| pk).collect();
+        normal
+    }
+
     fn check_consensus(&self) -> bool {
         // Find our proposal
         match self.proposals.get(&self.latest_ledger.id) {
@@ -399,24 +435,7 @@ impl Consensus {
 
                 // Determine the number of nodes that need to agree with our proposal to reach consensus
                 // by multiplying the number of validators in our UNL by 0.80 and taking the ceiling.
-                let mut too_fast: HashSet<&PublicKey> = HashSet::new();
-                self.progress.iter()
-                    .filter(|(r, _)| **r > self.latest_ledger.seq)
-                    .for_each(|(_, pks)| too_fast.extend(pks.iter()));
-
-                let too_slow: HashSet<&PublicKey> = if our_proposal.proposal.round > ConsensusRound::from(20) {
-                    let slow_cut_off = our_proposal.proposal.round - 20;//TODO 20 seconds?
-                    proposals.iter()
-                        .filter(|(_, prop)| prop.proposal.round < slow_cut_off)
-                        .map(|(pk, _)| pk).collect()
-                } else {
-                    HashSet::new()
-                };
-
-                let normal : HashSet<&PublicKey> = self.committee.authorities.iter()
-                    .filter(|(pk, _)| !(too_fast.contains(pk) || too_slow.contains(pk)))
-                    .map(|(pk, _)| pk).collect();
-
+                let normal = self.get_normal_validators();
                 let num_nodes_for_threshold = (normal.len() as f32 * 0.80).ceil() as usize;
 
                 // Determine how many proposals have the same set of batches as us.
@@ -530,6 +549,7 @@ impl Consensus {
 
     async fn process_validation(&mut self, validation: SignedValidation) {
         info!("Received validation from {:?} for ({:?}, {:?})", validation.validation.node_id, validation.validation.ledger_id, validation.validation.seq);
+        *self.freshness.get_mut(&validation.validation.node_id).unwrap() = self.timer_count;
         self.progress.entry(validation.validation.seq).or_insert_with(HashSet::new).insert(validation.validation.node_id);
         if let Err(e) = self.validations.try_add(&validation.validation.node_id, &validation).await {
             error!("{:?} could not be added. Error: {:?}", validation, e);
