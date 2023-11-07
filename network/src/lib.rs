@@ -7,6 +7,7 @@ mod simple_sender;
 #[cfg(test)]
 #[path = "tests/common.rs"]
 pub mod common;
+pub mod util;
 
 pub use crate::receiver::{MessageHandler, Receiver, Writer};
 pub use crate::reliable_sender::{CancelHandler, ReliableSender};

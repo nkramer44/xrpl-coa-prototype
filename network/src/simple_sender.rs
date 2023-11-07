@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use crate::util::length_delimited_codec;
 
 #[cfg(test)]
 #[path = "tests/simple_sender_tests.rs"]
@@ -104,7 +105,7 @@ impl Connection {
     async fn run(&mut self) {
         // Try to connect to the peer.
         let (mut writer, mut reader) = match TcpStream::connect(self.address).await {
-            Ok(stream) => Framed::new(stream, LengthDelimitedCodec::new()).split(),
+            Ok(stream) => Framed::new(stream, length_delimited_codec()).split(),
             Err(e) => {
                 warn!(
                     "{}",

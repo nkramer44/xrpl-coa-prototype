@@ -25,7 +25,10 @@ impl ValidationsAdaptor {
     pub fn new(
         clock: Arc<RwLock<WallNetClock>>
     ) -> Self {
-        Self { clock, ledger_cache: Default::default() }
+        let mut ledger_cache: HashMap<<Self as Adaptor>::LedgerIdType, Ledger> = Default::default();
+        let genesis = Ledger::make_genesis();
+        ledger_cache.insert(genesis.id, genesis);
+        Self { clock, ledger_cache }
     }
 
     pub fn add_ledger(&mut self, ledger: Ledger) {

@@ -100,8 +100,8 @@ impl Core {
     }
 
     async fn process_stored_batch(&mut self, batch: Digest, worker_id: WorkerId) {
-        #[cfg(feature = "benchmark")]
-        info!("Created {:?}", batch);
+        // #[cfg(feature = "benchmark")]
+        // info!("Created {:?}", batch);
 
         self.tx_primary_consensus_data
             .send(PrimaryConsensusMessageData::Batch((batch, worker_id)))
@@ -147,7 +147,8 @@ impl Core {
             .iter()
             .map(|(_, x)| x.primary_to_primary)
             .collect();
-        let bytes = bincode::serialize(&PrimaryPrimaryMessage::Proposal(proposal.clone()))
+        info!("About to send our own proposal {:?}", proposal);
+        let bytes = bincode::serialize(&PrimaryPrimaryMessage::Proposal(proposal))
             .expect("Failed to serialize our own proposal");
         let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
         self.cancel_handlers.extend(handlers);

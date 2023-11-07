@@ -2,10 +2,11 @@
 use bytes::Bytes;
 use config::{Committee, WorkerId};
 use crypto::{Digest, PublicKey};
-use log::{error, warn};
+use log::{error, info, warn};
 use network::SimpleSender;
 use store::Store;
 use tokio::sync::mpsc::Receiver;
+use crate::worker::WorkerMessage;
 
 #[cfg(test)]
 #[path = "tests/helper_tests.rs"]
@@ -48,7 +49,7 @@ impl Helper {
     async fn run(&mut self) {
         while let Some((digests, origin)) = self.rx_request.recv().await {
             // TODO [issue #7]: Do some accounting to prevent bad nodes from monopolizing our resources.
-
+            info!("Received sync request for {:?} digests.", digests.len());
             // get the requestors address.
             let address = match self.committee.worker(&origin, &self.id) {
                 Ok(x) => x.worker_to_worker,
@@ -59,13 +60,19 @@ impl Helper {
             };
 
             // Reply to the request (the best we can).
-            for digest in digests {
+            let mut missing = 0;
+            for digest in &digests {
                 match self.store.read(digest.to_vec()).await {
                     Ok(Some(data)) => self.network.send(address, Bytes::from(data)).await,
-                    Ok(None) => (),
+                    Ok(None) => {
+                        missing += 1;
+                        ()
+                    },
                     Err(e) => error!("{}", e),
                 }
             }
+
+            info!("Worker missing {:?} out of {:?} batches", missing, digests.len());
         }
     }
 }

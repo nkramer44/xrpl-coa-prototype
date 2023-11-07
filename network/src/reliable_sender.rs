@@ -16,6 +16,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use crate::util::length_delimited_codec;
 
 #[cfg(test)]
 #[path = "tests/reliable_sender_tests.rs"]
@@ -80,7 +81,9 @@ impl ReliableSender {
     ) -> Vec<CancelHandler> {
         let mut handlers = Vec::new();
         for address in addresses {
+            info!("Sending data to {:?}", address);
             let handler = self.send(address, data.clone()).await;
+            info!("Sent data to {:?}", address);
             handlers.push(handler);
         }
         handlers
@@ -187,7 +190,7 @@ impl Connection {
         // which we are still waiting to receive an ACK.
         let mut pending_replies = VecDeque::new();
 
-        let (mut writer, mut reader) = Framed::new(stream, LengthDelimitedCodec::new()).split();
+        let (mut writer, mut reader) = Framed::new(stream, length_delimited_codec()).split();
         let error = 'connection: loop {
             // Try to send all messages of the buffer.
             while let Some((data, handler)) = self.buffer.pop_front() {
@@ -196,9 +199,11 @@ impl Connection {
                     continue;
                 }
 
+                info!("keep_alive sending data.");
                 // Try to send the message.
                 match writer.send(data.clone()).await {
                     Ok(()) => {
+                        info!("keep_alive sent data.");
                         // The message has been sent, we remove it from the buffer and add it to
                         // `pending_replies` while we wait for an ACK.
                         pending_replies.push_back((data, handler));

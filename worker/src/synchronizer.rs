@@ -109,7 +109,7 @@ impl Synchronizer {
                 // Handle primary's messages.
                 Some(message) = self.rx_message.recv() => match message {
                     PrimaryWorkerMessage::Synchronize(digests, target) => {
-                        info!("Worker received synchronize request for {:?}", (&digests, &target));
+                        info!("Worker received synchronize request for {:?} batches", (digests.len(), &target));
                         let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .expect("Failed to measure time")
@@ -144,6 +144,8 @@ impl Synchronizer {
                             waiting.push(fut);
                             self.pending.insert(digest, (self.round, tx_cancel, now));
                         }
+
+                        info!("Missing {:?} batches.", missing.len());
 
                         // Send sync request to a single node. If this fails, we will send it
                         // to other nodes when a timer times out.
@@ -180,6 +182,7 @@ impl Synchronizer {
                 // Stream out the futures of the `FuturesUnordered` that completed.
                 Some(result) = waiting.next() => match result {
                     Ok(Some(digest)) => {
+                        info!("Synchronizer synced {:?}. Still pending: {:?}", digest, self.pending.len());
                         // We got the batch, remove it from the pending list.
                         // info!("Worker synced batch {:?}", digest);
                         self.pending.remove(&digest);

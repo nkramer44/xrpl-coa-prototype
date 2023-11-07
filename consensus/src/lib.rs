@@ -467,7 +467,7 @@ impl Consensus {
 
         #[cfg(feature = "benchmark")]
         for batch in &self.latest_ledger.batch_set {
-            info!("Committed {:?} ", batch);
+            // info!("Committed {:?} ", batch.0);
         }
     }
 

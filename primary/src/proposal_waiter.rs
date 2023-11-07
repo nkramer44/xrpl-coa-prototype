@@ -117,7 +117,6 @@ impl ProposalWaiter {
             tokio::select! {
                 Some(signed_proposal) = self.rx_network_proposal.recv() => {
                     //TODO verify sig
-
                     let batches = &signed_proposal.proposal.batches;
 
                     let mut missing = HashMap::new();
@@ -194,13 +193,15 @@ impl ProposalWaiter {
                             break;
                         }
 
-                        let (_, t) = f.unwrap();
+                        let (p, t) = f.unwrap();
+                        info!("Acquiring proposal {:?}", p);
                         if (now - t) < ACQUIRE_DELAY {
                             break;
                         }
 
                         let (signed_proposal, _) = self.to_acquire.pop_front().unwrap();
                         let proposal_id = signed_proposal.proposal.compute_id();
+                        let round = signed_proposal.proposal.round;
                         let author = signed_proposal.proposal.node_id.clone();
                         let batches = &signed_proposal.proposal.batches;
 
@@ -212,8 +213,8 @@ impl ProposalWaiter {
                         //let now = Instant::now();
 
                         let mut missing = HashMap::new();
-                        for (digest, worker_id) in batches.iter() {
-                            if ! self.batch_cache.contains(digest) {
+                        for (digest, worker_id) in batches {
+                            if !self.batch_cache.contains(digest) {
                                 let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
                                 match self.store.read(key).await {
                                     Ok(Some(_)) => {},
@@ -257,7 +258,7 @@ impl ProposalWaiter {
 
                         // Ensure we didn't already send a sync request for these batches.
                         let mut requires_sync = HashMap::new();
-                        for (digest, worker_id) in missing.into_iter() {
+                        for (digest, worker_id) in missing {
                             if self.batch_requests.contains(&digest) {
                                 continue;
                             }else{
@@ -265,15 +266,23 @@ impl ProposalWaiter {
                                 requires_sync.entry(worker_id).or_insert_with(Vec::new).push(digest);
                             }
                         }
+                        requires_sync.iter()
+                        .for_each(|r| {
+                            info!("About to sync {:?} batches for proposal {:?}", r.1.len(), (author, round));
+                        });
+
                         for (worker_id, digests) in requires_sync {
                             let address = self.committee
                             .worker(&self.name, &worker_id)
                             .expect("Author of valid Proposal is not in the committee")
                             .primary_to_worker;
+                            let digest_len = digests.len();
                             let message = PrimaryWorkerMessage::Synchronize(digests, author);
                             let bytes = bincode::serialize(&message)
                             .expect("Failed to serialize batch sync request");
+                            info!("About to send Synchronize request {:?}", (worker_id, digest_len));
                             self.network.send(address, Bytes::from(bytes)).await;
+                            info!("Sent Synchronize request {:?}", (worker_id, digest_len));
                             //TODO understand the network topology
                         }
                     }
