@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use async_recursion::async_recursion;
 use bytes::Bytes;
-use log::{error, info};
+use log::{debug, error, info};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
@@ -24,15 +24,13 @@ fn clock() -> u128 {
         .as_millis()
 }
 
-
 struct LedgerMaster {
     //tree : HashMap<LedgerIndex, HashMap<Digest, (Option<Ledger>, Vec<SignedValidation>)>>,
     tx_full_validated_ledgers: Sender<Vec<Ledger>>,
     index_to_hash: HashMap<LedgerIndex, HashSet<Digest>>,
-    //TODO
     hash_to_ledger: HashMap<Digest, Ledger>,
     hash_to_validators: HashMap<Digest, HashSet<PublicKey>>,
-    fully_validated: LedgerIndex,
+    pub fully_validated: LedgerIndex,
     pub quorum: usize,
 }
 
@@ -49,11 +47,13 @@ impl LedgerMaster {
         }
     }
 
-    async fn check_fully_validatored(&mut self, lsqn: LedgerIndex, lid: Digest) {
+    async fn check_fully_validated(&mut self, lsqn: LedgerIndex, lid: Digest) {
         let full = match self.hash_to_validators.get(&lid) {
             Some(validators) => { validators.len() >= self.quorum },
             None => false,
         };
+
+        info!("checking fully validated, ledger {:?} {}", lid, full);
 
         if full {
             let mut lsqn = lsqn;
@@ -73,6 +73,8 @@ impl LedgerMaster {
                 }
             }
 
+            info!("checking fully validated, need {} got {}", need, hashes.len());
+
             if hashes.len() == need {
                 self.fully_validated += need as u32;
                 let mut ledgers: Vec<Ledger> = Vec::new();
@@ -80,33 +82,42 @@ impl LedgerMaster {
                     let lid = hashes.pop().unwrap();
                     ledgers.push(self.hash_to_ledger.remove(&lid).unwrap());
                 }
+
+                #[cfg(feature = "benchmark")]
+                for l in &ledgers {
+                    for (batch, _) in &l.batch_set {
+                        if *batch.0.get(0).unwrap() == 0 as u8 {
+                            info!("Committed {:?} ", batch);
+                        }
+                    }
+                }
                 self.tx_full_validated_ledgers.send(ledgers).await;
             }
         }
     }
 
-    pub fn add_ledger(&mut self, l: Ledger) {//} -> Vec<Ledger> {
+    pub async fn add_ledger(&mut self, l: Ledger) {
         let lsqn = l.seq;
-        if lsqn <= self.fully_validated {
-            ()
+        info!("add_ledger {} {}", lsqn, self.fully_validated);
+        if lsqn > self.fully_validated {
+            let lid = l.id.clone();
+            if !self.hash_to_ledger.contains_key(&lid) {
+                self.hash_to_ledger.insert(lid.clone(), l);
+            }
+            self.check_fully_validated(lsqn, lid).await;
         }
-        let lid = l.id.clone();
-        if !self.hash_to_ledger.contains_key(&lid) {
-            self.hash_to_ledger.insert(lid.clone(), l);
-        }
-
-        self.check_fully_validatored(lsqn, lid);
     }
 
-    pub fn add_validation(&mut self, v: &SignedValidation) {
+    pub async fn add_validation(&mut self, v: &SignedValidation) {
         let lsqn = v.seq();
-        if lsqn <= self.fully_validated {
-            ()
+        info!("add_validation {} {}", lsqn, self.fully_validated);
+        if lsqn > self.fully_validated {
+            let lid = v.ledger_id();
+            self.hash_to_validators.entry(lid)
+                .or_insert_with(HashSet::new)
+                .insert(v.validation.node_id);
+            self.check_fully_validated(lsqn, lid).await;
         }
-        let lid = v.ledger_id();
-        self.hash_to_validators.entry(lid).or_insert_with(HashSet::new).insert(v.validation.node_id);
-
-        self.check_fully_validatored(lsqn, lid);
     }
 }
 
@@ -120,7 +131,7 @@ pub struct ValidationWaiter {
     rx_network_validations: Receiver<SignedValidation>,
     rx_network_ledgers: Receiver<Ledger>,
     tx_loopback_validations_ledgers: Sender<LedgerOrValidation>,
-    rx_own_ledgers: Receiver<Ledger>,
+    rx_own_ledgers: Receiver<LedgerOrValidation>,
 
     to_acquire: VecDeque<(SignedValidation, u128)>,
     validation_dependencies: HashMap<Digest, Vec<SignedValidation>>,
@@ -138,7 +149,8 @@ impl ValidationWaiter {
         rx_network_validations: Receiver<SignedValidation>,
         rx_network_ledgers: Receiver<Ledger>,
         tx_loopback_validations_ledgers: Sender<LedgerOrValidation>,
-        rx_own_ledgers: Receiver<Ledger>,
+        rx_own_ledgers: Receiver<LedgerOrValidation>,
+
         tx_full_validated_ledgers: Sender<Vec<Ledger>>,
     ) {
         tokio::spawn(async move {
@@ -255,15 +267,18 @@ impl ValidationWaiter {
             tokio::select! {
                 Some(signed_validation) = self.rx_network_validations.recv() => {
                     //TODO verify sig
-                    // info!("Waiter Received validation for ledger {:?}", signed_validation.validation.ledger_id);
-                    self.ledger_master.add_validation(&signed_validation);
+                    info!("Network validation {:?} {}, fully validated {}",
+                        signed_validation.validation.ledger_id,
+                        signed_validation.validation.seq,
+                        self.ledger_master.fully_validated);
+                    self.ledger_master.add_validation(&signed_validation).await;
 
                     let ledger_id = signed_validation.validation.ledger_id;
                     match self.store.read(ledger_id.to_vec()).await{
                         Ok(Some(_)) => {
                             self.tx_loopback_validations_ledgers
                             .send(LedgerOrValidation::Validation(signed_validation))
-                            .await //TODO need to wait?
+                            .await
                             .expect("Failed to send validation");
                         }
                         Ok(None) => {
@@ -278,8 +293,9 @@ impl ValidationWaiter {
 
                 Some(ledger) = self.rx_network_ledgers.recv() => {
                     //TODO verify ledger
-                    info!("Received ledger {:?} from the network.", ledger.id);
-                    self.ledger_master.add_ledger(ledger.clone());
+                    info!("Network ledger {:?} {}, fully validated {}",
+                        ledger.id, ledger.seq, self.ledger_master.fully_validated);
+                    self.ledger_master.add_ledger(ledger.clone()).await;
 
                     match self.try_store_ledger(ledger).await {
                         Some((digest, pk)) => {
@@ -299,11 +315,22 @@ impl ValidationWaiter {
                     }
                 },
 
-                Some(ledger) = self.rx_own_ledgers.recv() => {
-                    //TODO check parent exist in DB
-                    info!("Waiter got our own ledger {:?}", ledger.id);
-                    self.ledger_master.add_ledger(ledger.clone());
-                    self.store_ledger(ledger, true).await;
+                Some(ledger_or_validation) = self.rx_own_ledgers.recv() => {
+                    match ledger_or_validation {
+                        LedgerOrValidation::Ledger(ledger) => {
+                            info!("Own ledger {:?} {}, fully validated {}",
+                                ledger.id, ledger.seq, self.ledger_master.fully_validated);
+                            self.ledger_master.add_ledger(ledger.clone()).await;
+                            self.store_ledger(ledger, true).await;
+                        },
+                        LedgerOrValidation::Validation(signed_validation) => {
+                            info!("Own validation {:?} {}, fully validated {}",
+                                signed_validation.validation.ledger_id,
+                                signed_validation.validation.seq,
+                                self.ledger_master.fully_validated);
+                            self.ledger_master.add_validation(&signed_validation).await;
+                        },
+                    }
                 },
 
                 () = &mut timer => {
@@ -352,6 +379,3 @@ impl ValidationWaiter {
         }
     }
 }
-//
-// TODO Cleanup internal state.
-// TODO retry

@@ -30,7 +30,7 @@ pub type Round = u64;
 pub enum PrimaryPrimaryMessage {
     Proposal(SignedProposal),
     Validation(SignedValidation),
-    LedgerRequest(Vec<Digest>, /* requestor */ PublicKey), //TODO PublicKey
+    LedgerRequest(Vec<Digest>, /* requestor */ PublicKey),
     Ledger(Ledger),
 }
 
@@ -102,7 +102,7 @@ impl Primary {
         let (tx_loopback_validations_ledgers, rx_loopback_validations_ledgers) = channel(CHANNEL_CAPACITY);
 
         let (tx_full_validated_ledgers, rx_full_validated_ledgers) = channel(CHANNEL_CAPACITY);
-        let (tx_own_ledgers, rx_own_ledgers) = channel(CHANNEL_CAPACITY);
+        let (tx_own_validations_ledgers, rx_own_validations_ledgers) = channel(CHANNEL_CAPACITY);
 
         parameters.log();
 
@@ -171,7 +171,7 @@ impl Primary {
             rx_network_validations,
             rx_network_ledgers,
             tx_loopback_validations_ledgers,
-            rx_own_ledgers,
+            rx_own_validations_ledgers,
             tx_full_validated_ledgers,
         );
 
@@ -183,7 +183,7 @@ impl Primary {
             rx_consensus_primary,
             rx_loopback_proposals,
             rx_loopback_validations_ledgers,
-            tx_own_ledgers,
+            tx_own_validations_ledgers,
         );
 
         // NOTE: This log entry is used to compute performance.
@@ -216,16 +216,20 @@ impl MessageHandler for PrimaryReceiverHandler {
 
         // Deserialize and parse the message.
         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
-            PrimaryPrimaryMessage::Proposal(signed_proposal) => self
-                .tx_network_proposals
+            PrimaryPrimaryMessage::Proposal(signed_proposal) => {
+                let good = signed_proposal.verify();
+                info!("proposal sig {}", good);
+                self.tx_network_proposals
                 .send(signed_proposal)
                 .await
-                .expect("Failed to send proposal"),
-            PrimaryPrimaryMessage::Validation(signed_validation) => self
-                .tx_network_validations
+                .expect("Failed to send proposal")},
+            PrimaryPrimaryMessage::Validation(signed_validation) => {
+                let good = signed_validation.verify();
+                info!("validation sig {}", good);
+                self.tx_network_validations
                 .send(signed_validation)
                 .await
-                .expect("Failed to send validation"),
+                .expect("Failed to send validation")},
             PrimaryPrimaryMessage::Ledger(ledger) => self
                 .tx_network_ledgers
                 .send(ledger)

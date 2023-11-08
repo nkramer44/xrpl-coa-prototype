@@ -182,6 +182,8 @@ impl Consensus {
 
     async fn on_timeout(&mut self) {
         if let Some((preferred_seq, preferred_id)) = self.validations.get_preferred(&self.latest_ledger) {
+            info!("on_timeout, preferred ({:?} {}), latest ledger ({:?} {}) ", preferred_id, preferred_seq, self.latest_ledger.id, self.latest_ledger.seq);
+
             if preferred_id != self.latest_ledger.id() {
                 if *self.latest_ledger.ancestors.last().unwrap() == preferred_id {
                     error!("We just switched to {:?}'s parent {:?}", self.latest_ledger.id, preferred_id);
@@ -299,7 +301,8 @@ impl Consensus {
             //info!("Threshold: {:?}", threshold);
             // This is the number of UNL members who need to propose the same set of batches based
             // on the threshold percentage.
-            let num_nodes_threshold = (self.committee.authorities.len() as f32 * threshold).ceil() as u32;
+            let normal = self.get_normal_validators();
+            let num_nodes_threshold = (normal.len() as f32 * threshold).ceil() as u32;
             //info!("Num nodes needed: {:?}", num_nodes_threshold);
 
             // we should have, otherwise we should call propose_first()
@@ -323,7 +326,8 @@ impl Consensus {
             // and collect that into a new proposal set.
             let new_proposal_set: HashSet<(Digest, WorkerId)> = proposals.iter()
                 .map(|v| v.1)
-                .filter(|v| v.proposal.parent_id == self.latest_ledger.id)
+                .filter(|v| v.proposal.parent_id == self.latest_ledger.id &&
+                normal.contains(&v.proposal.node_id))
                 .flat_map(|v| v.proposal.batches.iter())
                 .fold(HashMap::<(Digest, WorkerId), u32>::new(), |mut map, digest| {
                     *map.entry(*digest).or_default() += 1;
@@ -337,15 +341,15 @@ impl Consensus {
             // Any batches that were included in our last proposal that do not make it to the next
             // proposal will be put back into the batch pool. This prevents batches that have not
             // been synced yet from ever getting into a ledger.
-            let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
-                .filter(|batch| !new_proposal_set.contains(batch))
-                .collect::<Vec<&(Digest, WorkerId)>>();
-            info!("Requeuing {:?} batches", to_queue.len());
-            self.batch_pool.extend(to_queue);
-            info!(
-                "Reproposing batch set w len: {:?}",
-                new_proposal_set.len()
-            );
+            // let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
+            //     .filter(|batch| !new_proposal_set.contains(batch))
+            //     .collect::<Vec<&(Digest, WorkerId)>>();
+            // info!("Requeuing {:?} batches", to_queue.len());
+            // self.batch_pool.extend(to_queue);
+            // info!(
+            //     "Reproposing batch set w len: {:?}",
+            //     new_proposal_set.len()
+            // );
             self.propose(new_proposal_set).await;
         }
     }
@@ -510,12 +514,12 @@ impl Consensus {
 
         info!("Did a new ledger {:?}. Num Batches {:?}", (self.latest_ledger.id, self.latest_ledger.seq()), self.latest_ledger.batch_set.len());
 
-        #[cfg(feature = "benchmark")]
-        for (batch, _) in &self.latest_ledger.batch_set {
-            if *batch.0.get(0).unwrap() == 0 as u8 {
-                info!("Committed {:?} ", batch);
-            }
-        }
+        // #[cfg(feature = "benchmark")]
+        // for (batch, _) in &self.latest_ledger.batch_set {
+        //     if *batch.0.get(0).unwrap() == 0 as u8 {
+        //         info!("Committed {:?} ", batch);
+        //     }
+        // }
     }
 
     fn execute(&self) -> Ledger {

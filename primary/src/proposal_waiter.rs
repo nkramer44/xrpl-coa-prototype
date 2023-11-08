@@ -176,8 +176,6 @@ impl ProposalWaiter {
                 },
 
                 Some(signed_proposal) = self.rx_network_proposal.recv() => {
-                    //TODO verify sig
-
                     let batches = &signed_proposal.proposal.batches;
                     let mut missing = Vec::new();
                     for batch in batches {
@@ -200,7 +198,7 @@ impl ProposalWaiter {
                         debug!("(1) Send proposal {:?}", signed_proposal);
                         self.tx_loopback_proposal
                         .send(signed_proposal)
-                        .await //TODO need to wait?
+                        .await
                         .expect("Failed to send proposal");
                         continue;
                     }
@@ -212,6 +210,7 @@ impl ProposalWaiter {
 
                 Some(ledgers) = self.rx_ledgers.recv() => {
                     for l in ledgers{
+                        info!("fully validated ledger {:?} {}", l.id, l.seq);
                         for batch in l.batch_set{
                             self.batch_cache.remove(&batch);
                         }
@@ -222,7 +221,7 @@ impl ProposalWaiter {
                     Ok(Some(signed_proposal)) => {
                         let signed_proposal : SignedProposal = signed_proposal;
                         info!("Synced proposal {:?}", signed_proposal);
-                        let pid = signed_proposal.proposal.compute_id();//TODO clone
+                        let pid = signed_proposal.proposal.compute_id();
                         let _ = self.pending.remove(&pid);
                         for (x, _) in & signed_proposal.proposal.batches {
                             let _ = self.batch_requests.remove(x);
@@ -288,7 +287,7 @@ impl ProposalWaiter {
                             debug!("(2) Send proposal {:?}", signed_proposal);
                             self.tx_loopback_proposal
                             .send(signed_proposal)
-                            .await //TODO need to wait?
+                            .await
                             .expect("Failed to send proposal");
                             continue;
                         }
@@ -329,7 +328,6 @@ impl ProposalWaiter {
                             let bytes = bincode::serialize(&message)
                             .expect("Failed to serialize batch sync request");
                             self.network.send(address, Bytes::from(bytes)).await;
-                            //TODO understand the network topology
                         }
                     }
                     //debug!("RESCHEDULE");
@@ -340,5 +338,3 @@ impl ProposalWaiter {
     }
 }
 // TODO don't acquire for old (previous consensus session) proposals
-// TODO Cleanup internal state.
-// TODO retry

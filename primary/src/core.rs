@@ -31,7 +31,7 @@ pub struct Core {
     rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
     rx_loopback_proposal: Receiver<SignedProposal>,
     rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
-    tx_own_ledgers: Sender<Ledger>,
+    tx_own_ledgers: Sender<LedgerOrValidation>,
 
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
@@ -51,7 +51,7 @@ impl Core {
         rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
         rx_loopback_proposal: Receiver<SignedProposal>,
         rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
-        tx_own_ledgers: Sender<Ledger>,
+        tx_own_ledgers: Sender<LedgerOrValidation>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -75,7 +75,7 @@ impl Core {
     async fn process_timer_event(&mut self) {
         self.tx_primary_consensus
             .send(PrimaryConsensusMessage::Timeout(self.timeout_count))
-            .await //TODO need to wait?
+            .await
             .expect("Failed to send timeout");
         self.timeout_count += 1;
     }
@@ -85,7 +85,7 @@ impl Core {
         debug!("Sending proposal to consensus {:?}", proposal);
         self.tx_primary_consensus
             .send(PrimaryConsensusMessage::Proposal(proposal))
-            .await //TODO need to wait?
+            .await
             .expect("Failed to send proposal");
     }
 
@@ -94,7 +94,7 @@ impl Core {
         // debug!("Processing {:?}", validation);
         self.tx_primary_consensus
             .send(PrimaryConsensusMessage::Validation(validation))
-            .await //TODO need to wait?
+            .await
             .expect("Failed to send validation");
     }
 
@@ -103,7 +103,7 @@ impl Core {
         // debug!("Processing {:?}", ledger);
         self.tx_primary_consensus
             .send(PrimaryConsensusMessage::SyncedLedger(ledger))
-            .await //TODO need to wait?
+            .await
             .expect("Failed to send ledger");
     }
 
@@ -121,6 +121,7 @@ impl Core {
     }
 
     async fn process_own_validation(&mut self, validation: SignedValidation) {
+        self.tx_own_ledgers.send(LedgerOrValidation::Validation(validation)).await.expect("cannot send self ledger to waiter");
         let addresses = self
             .committee
             .others_primaries(&self.name)
@@ -134,7 +135,7 @@ impl Core {
     }
 
     async fn process_own_ledger(&mut self, ledger: Ledger) {
-        self.tx_own_ledgers.send(ledger.clone()).await.expect("cannot send self ledger to waiter");
+        self.tx_own_ledgers.send(LedgerOrValidation::Ledger(ledger)).await.expect("cannot send self ledger to waiter");
     }
 
     // Main loop listening to incoming messages.
