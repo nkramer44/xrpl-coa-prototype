@@ -95,7 +95,7 @@ class LogParser:
         return size, rate, start, misses, samples
 
     def _parse_primaries(self, log):
-        if search(r'(?:panicked|Error)', log) is not None:
+        if search(r'(?:panicked |Error )', log) is not None:
             raise ParseError('Primary(s) panicked')
 
         tmp = findall(r'\[(.*Z) .* Created ([^ ]+=)', log)
@@ -135,7 +135,7 @@ class LogParser:
         return proposals, commits, configs, ip
 
     def _parse_workers(self, log):
-        if search(r'(?:panic|Error)', log) is not None:
+        if search(r'(?:panicked |Error )', log) is not None:
             raise ParseError('Worker(s) panicked')
 
         tmp = findall(r'Batch ([^ ]+) contains (\d+) B', log)
@@ -224,12 +224,12 @@ class LogParser:
             f' Max batch delay: {max_batch_delay:,} ms\n'
             '\n'
             ' + RESULTS:\n'
-            f' Consensus TPS: {round(consensus_tps):,} tx/s\n'
-            f' Consensus BPS: {round(consensus_bps):,} B/s\n'
+            f' Consensus TPS: {round(consensus_tps*256):,} tx/s\n'
+            f' Consensus BPS: {round(consensus_bps*256):,} B/s\n'
             f' Consensus latency: {round(consensus_latency):,} ms\n'
             '\n'
-            f' End-to-end TPS: {round(end_to_end_tps):,} tx/s\n'
-            f' End-to-end BPS: {round(end_to_end_bps):,} B/s\n'
+            f' End-to-end TPS: {round(end_to_end_tps*256):,} tx/s\n'
+            f' End-to-end BPS: {round(end_to_end_bps*256):,} B/s\n'
             f' End-to-end latency: {round(end_to_end_latency):,} ms\n'
             '-----------------------------------------\n'
         )

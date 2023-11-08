@@ -8,13 +8,13 @@ use log::{error, info, warn};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use tokio::sync::mpsc::{Receiver, Sender};
-use xrpl_consensus_core::{Ledger as LedgerTrait, NetClock};
+use xrpl_consensus_core::{Ledger as LedgerTrait, LedgerIndex, NetClock};
 use xrpl_consensus_validations::{Adaptor, ValidationError, ValidationParams, Validations};
 use xrpl_consensus_validations::arena_ledger_trie::ArenaLedgerTrie;
 
 use config::{Committee, WorkerId};
 use crypto::{Digest, PublicKey, SignatureService};
-use primary::{ConsensusPrimaryMessage, PrimaryConsensusMessage, PrimaryConsensusMessageData, SignedValidation, Validation};
+use primary::{ConsensusPrimaryMessage, PrimaryConsensusMessage, Batches, SignedValidation, Validation};
 use primary::Ledger;
 use primary::proposal::{ConsensusRound, Proposal, SignedProposal};
 
@@ -23,7 +23,7 @@ use crate::adaptor::ValidationsAdaptor;
 pub mod adaptor;
 
 pub const INITIAL_WAIT: Duration = Duration::from_secs(2);
-pub const MAX_PROPOSAL_SIZE: usize = 1_000_000;
+pub const MAX_PROPOSAL_SIZE: usize = 200_000;
 
 pub enum ConsensusState {
     NotSynced,
@@ -49,9 +49,13 @@ pub struct Consensus {
     validations: Validations<ValidationsAdaptor, ArenaLedgerTrie<Ledger>>,
     validation_cookie: u64,
     signature_service: SignatureService,
+    progress: HashMap<LedgerIndex, HashSet<PublicKey>>,
+    freshness: HashMap<PublicKey, u32>,
+    timer_count: u32,
+    //TODO cleanup, safe and simple to clean if knows when ledgers are fully validated
 
     rx_primary: Receiver<PrimaryConsensusMessage>,
-    rx_primary_data: Receiver<PrimaryConsensusMessageData>,
+    rx_primary_data: Receiver<Batches>,
     tx_primary: Sender<ConsensusPrimaryMessage>,
 }
 
@@ -63,7 +67,7 @@ impl Consensus {
         adaptor: ValidationsAdaptor,
         clock: Arc<RwLock<<ValidationsAdaptor as Adaptor>::ClockType>>,
         rx_primary: Receiver<PrimaryConsensusMessage>,
-        rx_primary_data: Receiver<PrimaryConsensusMessageData>,
+        rx_primary_data: Receiver<Batches>,
         tx_primary: Sender<ConsensusPrimaryMessage>,
     ) {
         tokio::spawn(async move {
@@ -82,6 +86,9 @@ impl Consensus {
                 validations: Validations::new(ValidationParams::default(), adaptor, clock),
                 validation_cookie: rng.next_u64(),
                 signature_service,
+                progress: HashMap::new(),
+                freshness: HashMap::new(),
+                timer_count: 0,
                 rx_primary,
                 rx_primary_data,
                 tx_primary,
@@ -98,7 +105,7 @@ impl Consensus {
         adaptor: ValidationsAdaptor,
         clock: Arc<RwLock<<ValidationsAdaptor as Adaptor>::ClockType>>,
         rx_primary: Receiver<PrimaryConsensusMessage>,
-        rx_primary_data: Receiver<PrimaryConsensusMessageData>,
+        rx_primary_data: Receiver<Batches>,
         tx_primary: Sender<ConsensusPrimaryMessage>,
     ) -> Self {
         let mut rng = OsRng {};
@@ -116,6 +123,9 @@ impl Consensus {
             validations: Validations::new(ValidationParams::default(), adaptor, clock),
             validation_cookie: rng.next_u64(),
             signature_service,
+            progress: HashMap::new(),
+            freshness: HashMap::new(),
+            timer_count: 0,
             rx_primary,
             rx_primary_data,
             tx_primary,
@@ -123,16 +133,23 @@ impl Consensus {
     }
 
     async fn run(&mut self) {
+        let mut pks : Vec<PublicKey> = self.committee.authorities.iter().map(|(pk, _)| (*pk).clone()).collect();
+        pks.into_iter().for_each(|(pk)| {
+            self.freshness.insert(pk, 0);
+        });
+
         loop {
             tokio::select! {
                 Some(message) = self.rx_primary_data.recv() => {
                     match message {
-                        PrimaryConsensusMessageData::Batch(batch) => {
+                        Batches::Batches(batches) => {
                             // Store any batches that come from the primary in batch_pool to be included
                             // in a future proposal.
                             // info!("Received batch {:?}.", batch.0);
-                            if !self.batch_pool.contains(&batch) {
-                                self.batch_pool.push_front(batch);
+                            for batch in batches {
+                                if !self.batch_pool.contains(&batch) {
+                                    self.batch_pool.push_front(batch);
+                                }
                             }
                         },
                     }
@@ -142,6 +159,7 @@ impl Consensus {
                     match message {
                         PrimaryConsensusMessage::Timeout(c) => {
                             info!("Received Timeout event, count {}", c);
+                            self.timer_count = c;
                             self.on_timeout().await;
                         },
                         PrimaryConsensusMessage::Proposal(proposal) => {
@@ -164,8 +182,10 @@ impl Consensus {
 
     async fn on_timeout(&mut self) {
         if let Some((preferred_seq, preferred_id)) = self.validations.get_preferred(&self.latest_ledger) {
+            info!("on_timeout, preferred ({:?} {}), latest ledger ({:?} {}) ", preferred_id, preferred_seq, self.latest_ledger.id, self.latest_ledger.seq);
+
             if preferred_id != self.latest_ledger.id() {
-                if self.latest_ledger.ancestors[0] == preferred_id {
+                if *self.latest_ledger.ancestors.last().unwrap() == preferred_id {
                     error!("We just switched to {:?}'s parent {:?}", self.latest_ledger.id, preferred_id);
                 }
                 warn!(
@@ -180,7 +200,7 @@ impl Consensus {
                     Entry::Occupied(mut proposals) => {
                         match proposals.get_mut().entry(self.node_id) {
                             Entry::Occupied(proposal) => {
-                                info!("adjust pool adding {:?} proposal batches", proposal.get().proposal.batches.len());
+                                info!("adjust pool, adding {:?} proposal batches", proposal.get().proposal.batches.len());
                                 self.batch_pool.extend(proposal.get().proposal.batches.iter());
                             }
                             Entry::Vacant(_) => {}
@@ -193,17 +213,19 @@ impl Consensus {
                 //by current design (oct 31, 2023), the node can be off by one ledger, not more
 
                 //put back batches in the ledgers on the wrong branch
-                info!("adjust pool adding {:?} ledger batches", self.latest_ledger.batch_set.len());
+                info!("adjust pool, adding {:?} ledger batches", self.latest_ledger.batch_set.len());
                 self.batch_pool.extend(self.latest_ledger.batch_set.iter());
 
                 //latest's parent is the common ancestor of the branches
-                let common_ancestor = self.latest_ledger.ancestors[0].clone();
+                let common_ancestor = self.latest_ledger.ancestors.last().unwrap().clone();
+                info!("adjust pool, common_ancestor {:?} ", common_ancestor);
                 //find out batches in the ledgers on the right branch, and take them out
                 let mut l = self.validations.adaptor_mut().acquire(&preferred_id).await
                     .expect("ValidationsAdaptor did not have a ledger in cache.");
                 while l.id != common_ancestor {
+                    info!("adjust pool, ledger on preferred branch {:?} ", l.id);
                     l.batch_set.iter().for_each(|x| {self.negative_pool.insert(x.clone());});
-                    l = self.validations.adaptor_mut().acquire(&l.ancestors[0]).await
+                    l = self.validations.adaptor_mut().acquire(&l.ancestors.last().unwrap()).await
                     .expect("ValidationsAdaptor did not have a ledger in cache.");
                 }
                 self.batch_pool = self.batch_pool.iter()
@@ -279,13 +301,16 @@ impl Consensus {
             //info!("Threshold: {:?}", threshold);
             // This is the number of UNL members who need to propose the same set of batches based
             // on the threshold percentage.
-            let num_nodes_threshold = (self.committee.authorities.len() as f32 * threshold).ceil() as u32;
+            let normal = self.get_normal_validators();
+            let num_nodes_threshold = (normal.len() as f32 * threshold).ceil() as u32;
             //info!("Num nodes needed: {:?}", num_nodes_threshold);
 
             // we should have, otherwise we should call propose_first()
             let proposals = self.proposals.get(&self.latest_ledger.id).unwrap();
 
             let num_proposals_for_this_ledger = proposals.len();
+
+            //TODO check rippled logic for reducing the number of proposals required
 
             if num_proposals_for_this_ledger < num_nodes_threshold as usize {
                 info!("We don't have consensus :( and We don't have enough proposals for child of ledger {:?}, need {}, have {}. Deferring to next round.",
@@ -301,7 +326,8 @@ impl Consensus {
             // and collect that into a new proposal set.
             let new_proposal_set: HashSet<(Digest, WorkerId)> = proposals.iter()
                 .map(|v| v.1)
-                .filter(|v| v.proposal.parent_id == self.latest_ledger.id)
+                .filter(|v| v.proposal.parent_id == self.latest_ledger.id &&
+                normal.contains(&v.proposal.node_id))
                 .flat_map(|v| v.proposal.batches.iter())
                 .fold(HashMap::<(Digest, WorkerId), u32>::new(), |mut map, digest| {
                     *map.entry(*digest).or_default() += 1;
@@ -315,15 +341,15 @@ impl Consensus {
             // Any batches that were included in our last proposal that do not make it to the next
             // proposal will be put back into the batch pool. This prevents batches that have not
             // been synced yet from ever getting into a ledger.
-            let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
-                .filter(|batch| !new_proposal_set.contains(batch))
-                .collect::<Vec<&(Digest, WorkerId)>>();
-            info!("Requeuing {:?} batches", to_queue.len());
-            self.batch_pool.extend(to_queue);
-            info!(
-                "Reproposing batch set w len: {:?}",
-                new_proposal_set.len()
-            );
+            // let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
+            //     .filter(|batch| !new_proposal_set.contains(batch))
+            //     .collect::<Vec<&(Digest, WorkerId)>>();
+            // info!("Requeuing {:?} batches", to_queue.len());
+            // self.batch_pool.extend(to_queue);
+            // info!(
+            //     "Reproposing batch set w len: {:?}",
+            //     new_proposal_set.len()
+            // );
             self.propose(new_proposal_set).await;
         }
     }
@@ -356,6 +382,7 @@ impl Consensus {
 
     fn on_proposal_received(&mut self, proposal: SignedProposal) {
         info!("Received new proposal: {:?}", proposal);
+        *self.freshness.get_mut(&proposal.proposal.node_id).unwrap() = self.timer_count;
         // The Primary will check the signature and make sure the proposal comes from
         // someone in our UNL before sending it to Consensus, therefore we do not need to
         // check here again. Additionally, the Primary will delay sending us a proposal until
@@ -382,6 +409,27 @@ impl Consensus {
         }
     }
 
+    fn get_normal_validators<'a>(&'a self) -> HashSet<&'a PublicKey> {
+        let mut too_fast: HashSet<&PublicKey> = HashSet::new();
+        self.progress.iter()
+            .filter(|(r, _)| **r > self.latest_ledger.seq)
+            .for_each(|(_, pks)| too_fast.extend(pks.iter()));
+
+        let too_slow: HashSet<&PublicKey> = if self.timer_count > 20 {
+            let slow_cut_off = self.timer_count - 20;//TODO 20 seconds?
+            self.freshness.iter()
+                .filter(|&(_, &last_seen)| last_seen <= slow_cut_off)
+                .map(|(pk, _)| pk).collect()
+        } else {
+            HashSet::new()
+        };
+
+        let normal : HashSet<&PublicKey> = self.committee.authorities.iter()
+            .filter(|(pk, _)| !(too_fast.contains(pk) || too_slow.contains(pk)))
+            .map(|(pk, _)| pk).collect();
+        normal
+    }
+
     fn check_consensus(&self) -> bool {
         // Find our proposal
         match self.proposals.get(&self.latest_ledger.id) {
@@ -391,11 +439,12 @@ impl Consensus {
 
                 // Determine the number of nodes that need to agree with our proposal to reach consensus
                 // by multiplying the number of validators in our UNL by 0.80 and taking the ceiling.
-                let num_nodes_for_threshold = (self.committee.authorities.len() as f32 * 0.80).ceil() as usize;
+                let normal = self.get_normal_validators();
+                let num_nodes_for_threshold = (normal.len() as f32 * 0.80).ceil() as usize;
 
                 // Determine how many proposals have the same set of batches as us.
                 let num_matching_sets = proposals.iter()
-                    .filter(|p| p.1.proposal.batches == our_proposal.proposal.batches)
+                    .filter(|(pk, prop)| normal.contains(pk) && prop.proposal.batches == our_proposal.proposal.batches)
                     .count();
 
                 // If 80% or more of UNL nodes proposed the same batch set, we have reached consensus,
@@ -465,15 +514,18 @@ impl Consensus {
 
         info!("Did a new ledger {:?}. Num Batches {:?}", (self.latest_ledger.id, self.latest_ledger.seq()), self.latest_ledger.batch_set.len());
 
-        #[cfg(feature = "benchmark")]
-        for batch in &self.latest_ledger.batch_set {
-            // info!("Committed {:?} ", batch.0);
-        }
+        // #[cfg(feature = "benchmark")]
+        // for (batch, _) in &self.latest_ledger.batch_set {
+        //     if *batch.0.get(0).unwrap() == 0 as u8 {
+        //         info!("Committed {:?} ", batch);
+        //     }
+        // }
     }
 
     fn execute(&self) -> Ledger {
         let mut new_ancestors = self.latest_ledger.ancestors.clone();
         new_ancestors.push(self.latest_ledger.id());
+        //assert!(new_ancestors[0] == self.latest_ledger.id());
         /*let mut new_ancestors = vec![self.latest_ledger.id()];
         new_ancestors.extend_from_slice(self.latest_ledger.ancestors.as_slice());*/
         //TODO assuming we proposed
@@ -501,6 +553,8 @@ impl Consensus {
 
     async fn process_validation(&mut self, validation: SignedValidation) {
         info!("Received validation from {:?} for ({:?}, {:?})", validation.validation.node_id, validation.validation.ledger_id, validation.validation.seq);
+        *self.freshness.get_mut(&validation.validation.node_id).unwrap() = self.timer_count;
+        self.progress.entry(validation.validation.seq).or_insert_with(HashSet::new).insert(validation.validation.node_id);
         if let Err(e) = self.validations.try_add(&validation.validation.node_id, &validation).await {
             error!("{:?} could not be added. Error: {:?}", validation, e);
         }

@@ -14,7 +14,6 @@ use log::info;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -31,7 +30,7 @@ pub type Round = u64;
 pub enum PrimaryPrimaryMessage {
     Proposal(SignedProposal),
     Validation(SignedValidation),
-    LedgerRequest(Vec<Digest>, /* requestor */ PublicKey), //TODO PublicKey
+    LedgerRequest(Vec<Digest>, /* requestor */ PublicKey),
     Ledger(Ledger),
 }
 
@@ -62,8 +61,8 @@ pub enum PrimaryConsensusMessage {
 }
 
 #[derive(Debug)]
-pub enum PrimaryConsensusMessageData {
-    Batch((Digest, WorkerId))
+pub enum Batches {
+    Batches(Vec<(Digest, WorkerId)>)
 }
 
 #[derive(Debug)]
@@ -88,11 +87,11 @@ impl Primary {
         parameters: Parameters,
         store: Store,
         tx_primary_consensus: Sender<PrimaryConsensusMessage>,
-        tx_primary_consensus_data: Sender<PrimaryConsensusMessageData>,
+        tx_primary_consensus_data: Sender<Batches>,
         rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
     ) {
-        let (tx_worker_batches, rx_worker_batches) = channel::<(Digest, WorkerId)>(CHANNEL_CAPACITY);
-        let (tx_store_batches, rx_stored_batches) = channel(CHANNEL_CAPACITY);
+        let (tx_worker_batches, rx_worker_batches) = channel(CHANNEL_CAPACITY);
+        let (tx_proposal_waiter_batches, rx_proposal_waiter_batches) = channel(CHANNEL_CAPACITY);
 
         let (tx_network_proposals, rx_network_proposals) = channel(CHANNEL_CAPACITY);
         let (tx_network_validations, rx_network_validations) = channel(CHANNEL_CAPACITY);
@@ -102,15 +101,12 @@ impl Primary {
         let (tx_loopback_proposals, rx_loopback_proposals) = channel(CHANNEL_CAPACITY);
         let (tx_loopback_validations_ledgers, rx_loopback_validations_ledgers) = channel(CHANNEL_CAPACITY);
 
-        let (tx_core_to_proposal_waiter, rx_core_to_proposal_waiter) = channel(CHANNEL_CAPACITY);
-        let (tx_own_ledgers, rx_own_ledgers) = channel(CHANNEL_CAPACITY);
+        let (tx_full_validated_ledgers, rx_full_validated_ledgers) = channel(CHANNEL_CAPACITY);
+        let (tx_own_validations_ledgers, rx_own_validations_ledgers) = channel(CHANNEL_CAPACITY);
 
         parameters.log();
 
         let name = public_key;
-
-        // Atomic variable use to synchronizer all tasks with the latest consensus round.
-        let consensus_round = Arc::new(AtomicU64::new(0));//TODO remove
 
         // Spawn the network receiver listening to messages from the other primaries.
         let mut address = committee
@@ -144,7 +140,7 @@ impl Primary {
             /* handler */
             WorkerReceiverHandler {
                 tx_worker_batches,
-                tx_store_batches,
+                //tx_store_batches,
             },
         );
         info!(
@@ -153,7 +149,7 @@ impl Primary {
         );
 
         // Receives batch digests from workers. They are only used to validate proposals.
-        PayloadReceiver::spawn(store.clone(), rx_worker_batches);
+        PayloadReceiver::spawn(store.clone(), rx_worker_batches, tx_proposal_waiter_batches, tx_primary_consensus_data);
 
         // The `Helper` is dedicated to reply to ledger requests from other primaries.
         Helper::spawn(committee.clone(), store.clone(), rx_ledger_requests);
@@ -162,10 +158,10 @@ impl Primary {
             name,
             committee.clone(),
             store.clone(),
-            //consensus_round,
+            rx_proposal_waiter_batches,
             rx_network_proposals,
             tx_loopback_proposals,
-            rx_core_to_proposal_waiter,
+            rx_full_validated_ledgers,
         );
 
         ValidationWaiter::spawn(
@@ -175,22 +171,19 @@ impl Primary {
             rx_network_validations,
             rx_network_ledgers,
             tx_loopback_validations_ledgers,
-            rx_own_ledgers,
+            rx_own_validations_ledgers,
+            tx_full_validated_ledgers,
         );
 
         Core::spawn(
             name,
             committee.clone(),
             store.clone(),
-            consensus_round.clone(),
             tx_primary_consensus,
-            tx_primary_consensus_data,
             rx_consensus_primary,
-            rx_stored_batches,
             rx_loopback_proposals,
             rx_loopback_validations_ledgers,
-            tx_own_ledgers,
-            tx_core_to_proposal_waiter,
+            tx_own_validations_ledgers,
         );
 
         // NOTE: This log entry is used to compute performance.
@@ -209,7 +202,6 @@ impl Primary {
 /// Defines how the network receiver handles incoming primary messages.
 #[derive(Clone)]
 struct PrimaryReceiverHandler {
-    // tx_primary_messages: Sender<PrimaryPrimaryMessage>,
     tx_network_proposals: Sender<SignedProposal>,
     tx_network_validations: Sender<SignedValidation>,
     tx_network_ledgers: Sender<Ledger>,
@@ -224,16 +216,20 @@ impl MessageHandler for PrimaryReceiverHandler {
 
         // Deserialize and parse the message.
         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
-            PrimaryPrimaryMessage::Proposal(signed_proposal) => self
-                .tx_network_proposals
+            PrimaryPrimaryMessage::Proposal(signed_proposal) => {
+                let good = signed_proposal.verify();
+                info!("proposal sig {}", good);
+                self.tx_network_proposals
                 .send(signed_proposal)
                 .await
-                .expect("Failed to send proposal"),
-            PrimaryPrimaryMessage::Validation(signed_validation) => self
-                .tx_network_validations
+                .expect("Failed to send proposal")},
+            PrimaryPrimaryMessage::Validation(signed_validation) => {
+                let good = signed_validation.verify();
+                info!("validation sig {}", good);
+                self.tx_network_validations
                 .send(signed_validation)
                 .await
-                .expect("Failed to send validation"),
+                .expect("Failed to send validation")},
             PrimaryPrimaryMessage::Ledger(ledger) => self
                 .tx_network_ledgers
                 .send(ledger)
@@ -254,7 +250,7 @@ impl MessageHandler for PrimaryReceiverHandler {
 #[derive(Clone)]
 struct WorkerReceiverHandler {
     tx_worker_batches: Sender<(Digest, WorkerId)>,
-    tx_store_batches: Sender<(Digest, WorkerId)>,
+//    tx_store_batches: Sender<(Digest, WorkerId)>,
 }
 
 #[async_trait]
@@ -264,26 +260,8 @@ impl MessageHandler for WorkerReceiverHandler {
         _writer: &mut Writer,
         serialized: Bytes,
     ) -> Result<(), Box<dyn Error>> {
-
-        // let p  = async move |digest : Digest, worker_id: WorkerId| {
-        //     self
-        //         .tx_store_batches
-        //         .send((digest.clone(), worker_id))
-        //         .await
-        //         .expect("Failed to send workers' digests");
-        //     self
-        //         .tx_worker_batches
-        //         .send((digest, worker_id))
-        //         .await
-        //         .expect("Failed to send workers' digests");
-        // };
         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
             WorkerPrimaryMessage::OurBatch(digest, worker_id) => {
-                self
-                    .tx_store_batches
-                    .send((digest.clone(), worker_id))
-                    .await
-                    .expect("Failed to send workers' digests");
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))
@@ -291,11 +269,6 @@ impl MessageHandler for WorkerReceiverHandler {
                     .expect("Failed to send workers' digests");
             }
             WorkerPrimaryMessage::OthersBatch(digest, worker_id) => {
-                self
-                    .tx_store_batches
-                    .send((digest.clone(), worker_id))
-                    .await
-                    .expect("Failed to send workers' digests");
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))

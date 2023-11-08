@@ -13,7 +13,7 @@ use crypto::{Digest, Hash};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Ledger {
     pub id: Digest,
-    seq: LedgerIndex,
+    pub seq: LedgerIndex,
     /// Ordered by latest -> oldest, ie the first element will be this ledger's parent.
     pub ancestors: Vec<Digest>,
     pub batch_set: Vec<(Digest, WorkerId)>,
