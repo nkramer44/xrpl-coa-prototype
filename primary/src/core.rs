@@ -73,6 +73,7 @@ impl Core {
     }
 
     async fn process_timer_event(&mut self) {
+        debug!("Sending timer {}", self.timeout_count);
         self.tx_primary_consensus
             .send(PrimaryConsensusMessage::Timeout(self.timeout_count))
             .await
