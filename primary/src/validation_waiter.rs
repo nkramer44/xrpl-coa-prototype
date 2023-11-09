@@ -83,8 +83,9 @@ impl LedgerMaster {
                     ledgers.push(self.hash_to_ledger.remove(&lid).unwrap());
                 }
 
-                #[cfg(feature = "benchmark")]
                 for l in &ledgers {
+                    info!("Fully validated ledger {:?}", l.id);
+                    #[cfg(feature = "benchmark")]
                     for (batch, _) in &l.batch_set {
                         if *batch.0.get(0).unwrap() == 0 as u8 {
                             info!("Committed {:?} ", batch);

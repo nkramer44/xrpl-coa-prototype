@@ -9,6 +9,7 @@ use futures::stream::StreamExt as _;
 use log::{debug, error, info};
 use network::{SimpleSender};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::task::ready;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -95,8 +96,9 @@ pub struct ProposalWaiter {
 
     /// Network driver allowing to send messages.
     network: SimpleSender,
-    batch_requests: HashSet<Digest>, // TODO cleanup or not
+    batch_requests: HashSet<(Digest, WorkerId)>, // TODO cleanup or not
     pending: HashMap<Digest, SignedProposal>,
+    ready: Vec<Digest>,
     dependencies: Dependencies,
 }
 
@@ -124,6 +126,7 @@ impl ProposalWaiter {
                 network: SimpleSender::new(),
                 batch_requests: HashSet::new(),
                 pending: HashMap::new(),
+                ready: Vec::new(),
                 dependencies: Dependencies::new(),
             }
                 .run()
@@ -143,18 +146,20 @@ impl ProposalWaiter {
                 Some(message) = self.rx_batches.recv() => {
                     match message {
                         Batches::Batches(batches) => {
-                            for pid in self.dependencies.addBatches(&batches){
-                                match self.pending.remove(&pid) {
-                                    Some(proposal) => {
-                                        debug!("(2) Send proposal {:?}", proposal);
-                                        self.tx_loopback_proposal.send(proposal)
-                                        .await.expect("Failed to send proposal");
-                                    },
-                                    None => {
-                                        panic!("Cannot find synced proposal");
-                                    },
-                                }
-                            }
+                            self.ready.extend(self.dependencies.addBatches(&batches));
+                            //
+                            // for pid in self.dependencies.addBatches(&batches){
+                            //     match self.pending.remove(&pid) {
+                            //         Some(proposal) => {
+                            //             debug!("(2) Send proposal {:?}", proposal);
+                            //             self.tx_loopback_proposal.send(proposal)
+                            //             .await.expect("Failed to send proposal");
+                            //         },
+                            //         None => {
+                            //             panic!("Cannot find synced proposal");
+                            //         },
+                            //     }
+                            // }
 
                             for (batch, wid) in batches{
                                 self.batch_cache.insert((batch, wid));
@@ -199,14 +204,29 @@ impl ProposalWaiter {
                 Some(ledgers) = self.rx_ledgers.recv() => {
                     for l in ledgers{
                         info!("fully validated ledger {:?} {}", l.id, l.seq);
-                        for batch in l.batch_set{
-                            self.batch_cache.remove(&batch);
-                        }
+                        // for batch in l.batch_set{
+                        //     self.batch_cache.remove(&batch);
+                        // }
                     }
                 },
 
                 () = &mut timer => {
                     //debug!("TIMEOUT");
+
+                    for pid in self.ready.drain(..) {
+                        match self.pending.remove(&pid) {
+                            Some(proposal) => {
+                                debug!("(2) Send proposal {:?}", proposal);
+                                self.tx_loopback_proposal.send(proposal)
+                                .await.expect("Failed to send proposal");
+                            },
+                            None => {
+                                panic!("Cannot find synced proposal");
+                            },
+                        }
+                    }
+                    assert!(self.ready.is_empty());
+
                     let now = clock();
                     loop{
                         let f = self.to_acquire.front();
@@ -240,10 +260,10 @@ impl ProposalWaiter {
                         // Ensure we didn't already send a sync request for these batches.
                         let mut requires_sync = HashMap::new();
                         for (digest, worker_id) in still_missing.into_iter() {
-                            if self.batch_requests.contains(&digest) {
+                            if self.batch_requests.contains(&(digest, worker_id)) {
                                 continue;
                             }else{
-                                self.batch_requests.insert(digest.clone());
+                                self.batch_requests.insert((digest, worker_id).clone());
                                 requires_sync.entry(worker_id).or_insert_with(Vec::new).push(digest);
                             }
                         }
