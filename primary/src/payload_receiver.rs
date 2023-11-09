@@ -4,7 +4,7 @@ use crypto::Digest;
 use store::Store;
 use tokio::sync::mpsc::{Sender, Receiver};
 use crate::Batches;
-use log::info;
+use log::{debug, info};
 
 /// Receives batches' digests of other authorities. These are only needed to verify incoming
 /// headers (ie. make sure we have their payload).
@@ -36,10 +36,9 @@ impl PayloadReceiver {
                 #[cfg(feature = "benchmark")]
                 info!("Created {:?}", batch);
             }
-            let key = [batch.as_ref(), &worker_id.to_le_bytes()].concat();
-            self.store.write(key.to_vec(), Vec::default()).await;
             self.batch_buf.push((batch, worker_id));
             if self.batch_buf.len() >= 100 {
+                //debug!("sending batches");
                 let batches = Batches::Batches(self.batch_buf.clone().drain(..).collect());
                 self.tx_consensus.send(batches).await;
                 let batches = Batches::Batches(self.batch_buf.drain(..).collect());

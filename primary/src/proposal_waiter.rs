@@ -1,17 +1,16 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::error::{DagError, DagResult};
+
 use crate::primary::{PrimaryWorkerMessage};
 use bytes::Bytes;
 use config::{Committee, WorkerId};
 use crypto::{Digest, PublicKey};
-use futures::future::try_join_all;
-use futures::stream::futures_unordered::FuturesUnordered;
+
 use futures::stream::StreamExt as _;
 use log::{debug, error, info};
-use network::SimpleSender;
+use network::{SimpleSender};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
-use store::Store;
+
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
 use crate::{Batches, Ledger};
@@ -85,8 +84,6 @@ pub struct ProposalWaiter {
     name: PublicKey,
     /// The committee information.
     committee: Committee,
-    /// The persistent storage.
-    store: Store,
 
     rx_batches: Receiver<Batches>,
     rx_network_proposal: Receiver<SignedProposal>,
@@ -94,13 +91,12 @@ pub struct ProposalWaiter {
     rx_ledgers: Receiver<Vec<Ledger>>,
 
     batch_cache: HashSet<(Digest, WorkerId)>,
-    to_acquire: VecDeque<(SignedProposal, u128)>,
+    to_acquire: VecDeque<(u128, Vec<(Digest, WorkerId)>, PublicKey)>,
 
     /// Network driver allowing to send messages.
     network: SimpleSender,
-
     batch_requests: HashSet<Digest>, // TODO cleanup or not
-    pending: HashSet<Digest>,
+    pending: HashMap<Digest, SignedProposal>,
     dependencies: Dependencies,
 }
 
@@ -109,7 +105,6 @@ impl ProposalWaiter {
     pub fn spawn(
         name: PublicKey,
         committee: Committee,
-        store: Store,
         rx_batches: Receiver<Batches>,
         rx_network_proposal: Receiver<SignedProposal>,
         tx_loopback_proposal: Sender<SignedProposal>,
@@ -119,7 +114,7 @@ impl ProposalWaiter {
             Self {
                 name,
                 committee,
-                store,
+                //store,
                 rx_batches,
                 rx_network_proposal,
                 tx_loopback_proposal,
@@ -128,7 +123,7 @@ impl ProposalWaiter {
                 to_acquire: VecDeque::new(),
                 network: SimpleSender::new(),
                 batch_requests: HashSet::new(),
-                pending: HashSet::new(),
+                pending: HashMap::new(),
                 dependencies: Dependencies::new(),
             }
                 .run()
@@ -136,28 +131,9 @@ impl ProposalWaiter {
         });
     }
 
-    /// Helper function. It waits for particular data to become available in the storage
-    /// and then delivers the specified Proposal.
-    async fn batch_waiter(
-        mut missing: Vec<(Vec<u8>, Store)>,
-        deliver: SignedProposal,
-        //mut handler: Receiver<()>,
-    ) -> DagResult<Option<SignedProposal>> {
-        let waiting: Vec<_> = missing
-            .iter_mut()
-            .map(|(x, y)| y.notify_read(x.to_vec()))
-            .collect();
-        tokio::select! {
-            result = try_join_all(waiting) => {
-                result.map(|_| Some(deliver)).map_err(DagError::from)
-            }
-           // _ = handler.recv() => Ok(None),
-        }
-    }
-
     /// Main loop listening to the `Synchronizer` messages.
     async fn run(&mut self) {
-        let mut waiting = FuturesUnordered::new();
+        //let mut waiting = FuturesUnordered::new();
 
         let timer = sleep(Duration::from_millis(TIMER_RESOLUTION));
         tokio::pin!(timer);
@@ -167,7 +143,19 @@ impl ProposalWaiter {
                 Some(message) = self.rx_batches.recv() => {
                     match message {
                         Batches::Batches(batches) => {
-                            self.dependencies.addBatches(&batches);
+                            for pid in self.dependencies.addBatches(&batches){
+                                match self.pending.remove(&pid) {
+                                    Some(proposal) => {
+                                        debug!("(2) Send proposal {:?}", proposal);
+                                        self.tx_loopback_proposal.send(proposal)
+                                        .await.expect("Failed to send proposal");
+                                    },
+                                    None => {
+                                        panic!("Cannot find synced proposal");
+                                    },
+                                }
+                            }
+
                             for (batch, wid) in batches{
                                 self.batch_cache.insert((batch, wid));
                             }
@@ -176,20 +164,17 @@ impl ProposalWaiter {
                 },
 
                 Some(signed_proposal) = self.rx_network_proposal.recv() => {
+                    let proposal_id = signed_proposal.proposal.compute_id();
+                    // Ensure we sync only once per proposal.
+                    if self.pending.contains_key(&proposal_id) {
+                        continue;
+                    }
+
                     let batches = &signed_proposal.proposal.batches;
                     let mut missing = Vec::new();
                     for batch in batches {
                         if ! self.batch_cache.contains(batch) {
-                            let key = [batch.0.as_ref(), &batch.1.to_le_bytes()].concat();
-                            match self.store.read(key).await {
-                                Ok(Some(_)) => {},
-                                Ok(None) => {
-                                    missing.push(batch);
-                                },
-                                Err(e) => {
-                                    error!("{}", e);
-                                },
-                            }
+                            missing.push(batch.clone());
                         }
                     }
 
@@ -205,7 +190,10 @@ impl ProposalWaiter {
 
                     debug!("Waiting proposal {:?}, missing {}", signed_proposal, missing.len());
                     let now = clock();
-                    self.to_acquire.push_back((signed_proposal, now));
+                    let author = signed_proposal.proposal.node_id.clone();
+                    self.dependencies.addDependencies(&missing, &proposal_id);
+                    self.to_acquire.push_back((now, missing, author));
+                    self.pending.insert(proposal_id, signed_proposal);
                 },
 
                 Some(ledgers) = self.rx_ledgers.recv() => {
@@ -214,27 +202,6 @@ impl ProposalWaiter {
                         for batch in l.batch_set{
                             self.batch_cache.remove(&batch);
                         }
-                    }
-                },
-
-                Some(result) = waiting.next() => match result {
-                    Ok(Some(signed_proposal)) => {
-                        let signed_proposal : SignedProposal = signed_proposal;
-                        info!("Synced proposal {:?}", signed_proposal);
-                        let pid = signed_proposal.proposal.compute_id();
-                        let _ = self.pending.remove(&pid);
-                        for (x, _) in & signed_proposal.proposal.batches {
-                            let _ = self.batch_requests.remove(x);
-                        }
-                        debug!("(3) Send proposal {:?}", signed_proposal);
-                        self.tx_loopback_proposal.send(signed_proposal).await.expect("Failed to send proposal");
-                    },
-                    Ok(None) => {
-                        // This request has been canceled.
-                    },
-                    Err(e) => {
-                        error!("{}", e);
-                        panic!("Storage failure: killing node.");
                     }
                 },
 
@@ -247,34 +214,17 @@ impl ProposalWaiter {
                             break;
                         }
 
-                        let (_, t) = f.unwrap();
+                        let (t, _, _) = f.unwrap();
                         if (now - t) < ACQUIRE_DELAY {
                             break;
                         }
 
-                        let (signed_proposal, _) = self.to_acquire.pop_front().unwrap();
-                        let proposal_id = signed_proposal.proposal.compute_id();
-                        let author = signed_proposal.proposal.node_id.clone();
-                        let batches = &signed_proposal.proposal.batches;
+                        let (_, missing, author) = self.to_acquire.pop_front().unwrap();
 
-                        // Ensure we sync only once per proposal.
-                        if self.pending.contains(&proposal_id) {
-                            continue;
-                        }
-
-                        let mut missing = Vec::new();
-                        for batch in batches {
-                            if ! self.batch_cache.contains(batch) {
-                                let key = [batch.0.as_ref(), &batch.1.to_le_bytes()].concat();
-                                match self.store.read(key).await {
-                                    Ok(Some(_)) => {},
-                                    Ok(None) => {
-                                        missing.push(*batch);
-                                    },
-                                    Err(e) => {
-                                        error!("{}", e);
-                                    },
-                                }
+                        let mut still_missing = Vec::new();
+                        for batch in missing {
+                            if ! self.batch_cache.contains(&batch) {
+                                still_missing.push(batch);
                             }
                         }
 
@@ -283,35 +233,13 @@ impl ProposalWaiter {
                             (author, signed_proposal.proposal.parent_id, signed_proposal.proposal.round),
                             missing.keys().collect::<Vec<&Digest>>()
                         );*/
-                        if missing.is_empty() {
-                            debug!("(2) Send proposal {:?}", signed_proposal);
-                            self.tx_loopback_proposal
-                            .send(signed_proposal)
-                            .await
-                            .expect("Failed to send proposal");
+                        if still_missing.is_empty() {
                             continue;
                         }
 
-                        debug!("Synching proposal {:?} {:?}, missing {}", proposal_id, signed_proposal, missing.len());
-                        self.dependencies.addDependencies(&missing, &proposal_id);
-
-                        // Add the Proposal to the waiter pool. The waiter will return it to when all
-                        // its parents are in the store.
-                        let wait_for = missing
-                            .iter()
-                            .map(|(digest, worker_id)| {
-                                let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
-                                (key.to_vec(), self.store.clone())
-                            })
-                            .collect();
-
-                        self.pending.insert(proposal_id);//, (round, tx_cancel));
-                        let fut = Self::batch_waiter(wait_for, signed_proposal);//, rx_cancel);
-                        waiting.push(fut);
-
                         // Ensure we didn't already send a sync request for these batches.
                         let mut requires_sync = HashMap::new();
-                        for (digest, worker_id) in missing.into_iter() {
+                        for (digest, worker_id) in still_missing.into_iter() {
                             if self.batch_requests.contains(&digest) {
                                 continue;
                             }else{

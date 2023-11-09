@@ -157,7 +157,7 @@ impl Primary {
         ProposalWaiter::spawn(
             name,
             committee.clone(),
-            store.clone(),
+            //store.clone(),
             rx_proposal_waiter_batches,
             rx_network_proposals,
             tx_loopback_proposals,
@@ -218,14 +218,14 @@ impl MessageHandler for PrimaryReceiverHandler {
         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
             PrimaryPrimaryMessage::Proposal(signed_proposal) => {
                 let good = signed_proposal.verify();
-                info!("proposal sig {}", good);
+                info!("MessageHandler proposal sig {}", good);
                 self.tx_network_proposals
                 .send(signed_proposal)
                 .await
                 .expect("Failed to send proposal")},
             PrimaryPrimaryMessage::Validation(signed_validation) => {
                 let good = signed_validation.verify();
-                info!("validation sig {}", good);
+                info!("MessageHandler validation sig {}", good);
                 self.tx_network_validations
                 .send(signed_validation)
                 .await
@@ -250,7 +250,6 @@ impl MessageHandler for PrimaryReceiverHandler {
 #[derive(Clone)]
 struct WorkerReceiverHandler {
     tx_worker_batches: Sender<(Digest, WorkerId)>,
-//    tx_store_batches: Sender<(Digest, WorkerId)>,
 }
 
 #[async_trait]
@@ -262,6 +261,10 @@ impl MessageHandler for WorkerReceiverHandler {
     ) -> Result<(), Box<dyn Error>> {
         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
             WorkerPrimaryMessage::OurBatch(digest, worker_id) => {
+                // if *(digest.0.get(0).unwrap()) == 0 as u8 {
+                //     #[cfg(feature = "benchmark")]
+                //     info!("Created {:?}", digest);
+                // }
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))
@@ -269,6 +272,10 @@ impl MessageHandler for WorkerReceiverHandler {
                     .expect("Failed to send workers' digests");
             }
             WorkerPrimaryMessage::OthersBatch(digest, worker_id) => {
+                // if *(digest.0.get(0).unwrap()) == 0 as u8 {
+                //     #[cfg(feature = "benchmark")]
+                //     info!("Created {:?}", digest);
+                // }
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))

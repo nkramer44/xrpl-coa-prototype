@@ -4,7 +4,7 @@ use std::ops::Sub;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -141,11 +141,11 @@ impl Consensus {
         loop {
             tokio::select! {
                 Some(message) = self.rx_primary_data.recv() => {
+                    //debug!("Received batches");
                     match message {
                         Batches::Batches(batches) => {
                             // Store any batches that come from the primary in batch_pool to be included
                             // in a future proposal.
-                            // info!("Received batch {:?}.", batch.0);
                             for batch in batches {
                                 if !self.batch_pool.contains(&batch) {
                                     self.batch_pool.push_front(batch);
@@ -167,7 +167,7 @@ impl Consensus {
                             self.on_proposal_received(proposal);
                         },
                         PrimaryConsensusMessage::SyncedLedger(synced_ledger) => {
-                            // info!("Received SyncedLedger.");
+                            info!("Received SyncedLedger.");
                             self.validations.adaptor_mut().add_ledger(synced_ledger);
                         },
                         PrimaryConsensusMessage::Validation(validation) => {
