@@ -31,11 +31,12 @@ pub struct Core {
     rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
     rx_loopback_proposal: Receiver<SignedProposal>,
     rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
+    tx_primary_consensus_timeout: Sender<u32>,
+
     tx_own_ledgers: Sender<LedgerOrValidation>,
 
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
-
     /// TODO: We need some way to clean this Vec up.
     cancel_handlers: Vec<CancelHandler>,
     timeout_count: u32,
@@ -52,6 +53,7 @@ impl Core {
         rx_loopback_proposal: Receiver<SignedProposal>,
         rx_loopback_validations_ledgers: Receiver<LedgerOrValidation>,
         tx_own_ledgers: Sender<LedgerOrValidation>,
+        tx_primary_consensus_timeout: Sender<u32>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -63,6 +65,7 @@ impl Core {
                 rx_loopback_proposal,
                 rx_loopback_validations_ledgers,
                 tx_own_ledgers,
+                tx_primary_consensus_timeout,
                 network: ReliableSender::new(),
                 cancel_handlers: vec![],
                 timeout_count: 0,
@@ -74,8 +77,8 @@ impl Core {
 
     async fn process_timer_event(&mut self) {
         debug!("Sending timer {}", self.timeout_count);
-        self.tx_primary_consensus
-            .send(PrimaryConsensusMessage::Timeout(self.timeout_count))
+        self.tx_primary_consensus_timeout
+            .send(self.timeout_count)
             .await
             .expect("Failed to send timeout");
         self.timeout_count += 1;
@@ -159,8 +162,17 @@ impl Core {
                 Some(cp_message) = self.rx_consensus_primary.recv() => {
                     match cp_message {
                         ConsensusPrimaryMessage::Proposal(proposal) => self.process_own_proposal(proposal.as_ref().clone()).await,
-                        ConsensusPrimaryMessage::Validation(validation) => self.process_own_validation(validation).await,
-                        ConsensusPrimaryMessage::NewLedger(ledger) => self.process_own_ledger(ledger).await,
+                        ConsensusPrimaryMessage::Validation(validation) => {
+                            info!("Core received own validation {:?}.", (validation.validation.node_id, validation.validation.seq, validation.validation.ledger_id));
+                            self.process_own_validation(validation).await;
+                            info!("Core received own validation (2) {:?}.", (validation.validation.node_id, validation.validation.seq, validation.validation.ledger_id));
+                        },
+                        ConsensusPrimaryMessage::NewLedger(ledger) => {
+                            let ledger_info = (ledger.id, ledger.seq);
+                            info!("Core received own ledger {:?}.", ledger_info);
+                            self.process_own_ledger(ledger).await;
+                            info!("Core received own ledger (2) {:?}.", ledger_info);
+                        },
                     }
                 }
 

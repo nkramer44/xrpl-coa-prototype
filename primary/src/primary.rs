@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::validation_waiter::{ValidationWaiter};
 use crate::core::Core;
@@ -17,8 +18,10 @@ use std::error::Error;
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::{Mutex, RwLock};
 use crate::{Ledger, SignedValidation};
 use crate::proposal::SignedProposal;
+use crate::validation_acquirer::ValidationAcquirer;
 
 /// The default channel capacity for each channel of the primary.
 pub const CHANNEL_CAPACITY: usize = 1_000_000;
@@ -54,7 +57,6 @@ pub enum WorkerPrimaryMessage {
 
 #[derive(Debug)]
 pub enum PrimaryConsensusMessage {
-    Timeout(u32),
     Proposal(SignedProposal),
     SyncedLedger(Ledger),
     Validation(SignedValidation),
@@ -88,6 +90,7 @@ impl Primary {
         store: Store,
         tx_primary_consensus: Sender<PrimaryConsensusMessage>,
         tx_primary_consensus_data: Sender<Batches>,
+        tx_primary_consensus_timeout: Sender<u32>,
         rx_consensus_primary: Receiver<ConsensusPrimaryMessage>,
     ) {
         let (tx_worker_batches, rx_worker_batches) = channel(CHANNEL_CAPACITY);
@@ -101,8 +104,8 @@ impl Primary {
         let (tx_loopback_proposals, rx_loopback_proposals) = channel(CHANNEL_CAPACITY);
         let (tx_loopback_validations_ledgers, rx_loopback_validations_ledgers) = channel(CHANNEL_CAPACITY);
 
-        let (tx_full_validated_ledgers, rx_full_validated_ledgers) = channel(CHANNEL_CAPACITY);
-        let (tx_own_validations_ledgers, rx_own_validations_ledgers) = channel(CHANNEL_CAPACITY);
+        let (tx_full_validated_ledgers, rx_full_validated_ledgers) = channel(1000);
+        let (tx_own_validations_ledgers, rx_own_validations_ledgers) = channel(1000);
 
         parameters.log();
 
@@ -164,6 +167,9 @@ impl Primary {
             rx_full_validated_ledgers,
         );
 
+        let to_acquire = Arc::new(RwLock::new(VecDeque::new()));
+        let validation_dependencies = Arc::new(Mutex::new(HashMap::new()));
+        let ledger_dependencies = Arc::new(Mutex::new(HashMap::new()));
         ValidationWaiter::spawn(
             name,
             committee.clone(),
@@ -172,7 +178,18 @@ impl Primary {
             rx_network_ledgers,
             tx_loopback_validations_ledgers,
             rx_own_validations_ledgers,
+            to_acquire.clone(),
+            validation_dependencies.clone(),
+            ledger_dependencies.clone(),
             tx_full_validated_ledgers,
+        );
+
+        ValidationAcquirer::spawn(
+            committee.clone(),
+            name,
+            to_acquire.clone(),
+            validation_dependencies.clone(),
+            ledger_dependencies.clone()
         );
 
         Core::spawn(
@@ -184,6 +201,7 @@ impl Primary {
             rx_loopback_proposals,
             rx_loopback_validations_ledgers,
             tx_own_validations_ledgers,
+            tx_primary_consensus_timeout
         );
 
         // NOTE: This log entry is used to compute performance.

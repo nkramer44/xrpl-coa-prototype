@@ -67,7 +67,7 @@ impl Dependencies {
                                 //debug!("D-CHECK {} has {} missing", p, *c);
                                 if *c == 0 {
                                     self.missing_counts.remove(&p);
-                                    info!("D-CHECK Synced proposal {:?} should be delivered", p);
+                                    // info!("D-CHECK Synced proposal {:?} should be delivered", p);
                                     pids.push(p);
                                 }
                             }
@@ -195,7 +195,7 @@ impl ProposalWaiter {
 
                     // info!("Proposal {:?} missing {:?}", signed_proposal, missing.keys().collect::<Vec<&Digest>>());
                     if missing.is_empty() {
-                        debug!("(1) Send proposal {:?}", signed_proposal);
+                        // debug!("(1) Send proposal {:?}", signed_proposal);
                         self.tx_loopback_proposal
                         .send(signed_proposal)
                         .await
@@ -226,7 +226,7 @@ impl ProposalWaiter {
                         for (x, _) in & signed_proposal.proposal.batches {
                             let _ = self.batch_requests.remove(x);
                         }
-                        debug!("(3) Send proposal {:?}", signed_proposal);
+                        // debug!("(3) Send proposal {:?}", signed_proposal);
                         self.tx_loopback_proposal.send(signed_proposal).await.expect("Failed to send proposal");
                     },
                     Ok(None) => {
@@ -284,7 +284,7 @@ impl ProposalWaiter {
                             missing.keys().collect::<Vec<&Digest>>()
                         );*/
                         if missing.is_empty() {
-                            debug!("(2) Send proposal {:?}", signed_proposal);
+                            // debug!("(2) Send proposal {:?}", signed_proposal);
                             self.tx_loopback_proposal
                             .send(signed_proposal)
                             .await
@@ -319,10 +319,10 @@ impl ProposalWaiter {
                                 requires_sync.entry(worker_id).or_insert_with(Vec::new).push(digest);
                             }
                         }
-                        requires_sync.iter()
+                        /*requires_sync.iter()
                         .for_each(|r| {
                             info!("About to sync {:?} batches for proposal {:?}", r.1.len(), (author, round));
-                        });
+                        });*/
 
                         for (worker_id, digests) in requires_sync {
                             let address = self.committee

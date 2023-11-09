@@ -1,11 +1,13 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use log::{debug, error, info};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 use xrpl_consensus_core::{LedgerIndex, Validation};
 use config::Committee;
@@ -86,12 +88,12 @@ impl LedgerMaster {
                 #[cfg(feature = "benchmark")]
                 for l in &ledgers {
                     for (batch, _) in &l.batch_set {
-                        if *batch.0.get(0).unwrap() == 0 as u8 {
-                            info!("Committed {:?} ", batch);
-                        }
+                        // if *batch.0.get(0).unwrap() == 0 as u8 {
+                        info!("Committed {:?} ", batch);
+                        // }
                     }
                 }
-                self.tx_full_validated_ledgers.send(ledgers).await;
+                self.tx_full_validated_ledgers.send(ledgers).await.unwrap();
             }
         }
     }
@@ -110,7 +112,7 @@ impl LedgerMaster {
 
     pub async fn add_validation(&mut self, v: &SignedValidation) {
         let lsqn = v.seq();
-        info!("add_validation {} {}", lsqn, self.fully_validated);
+        // info!("add_validation {} {}", lsqn, self.fully_validated);
         if lsqn > self.fully_validated {
             let lid = v.ledger_id();
             self.hash_to_validators.entry(lid)
@@ -133,9 +135,9 @@ pub struct ValidationWaiter {
     tx_loopback_validations_ledgers: Sender<LedgerOrValidation>,
     rx_own_ledgers: Receiver<LedgerOrValidation>,
 
-    to_acquire: VecDeque<(SignedValidation, u128)>,
-    validation_dependencies: HashMap<Digest, Vec<SignedValidation>>,
-    ledger_dependencies: HashMap<Digest, (Vec<Ledger>, PublicKey)>, // contains pending acquires
+    to_acquire: Arc<RwLock<VecDeque<(SignedValidation, u128)>>>,
+    validation_dependencies: Arc<Mutex<HashMap<Digest, Vec<SignedValidation>>>>,
+    ledger_dependencies: Arc<Mutex<HashMap<Digest, (Vec<Ledger>, PublicKey)>>>, // contains pending acquires
 
     /// Network driver allowing to send messages.
     network: SimpleSender,
@@ -150,7 +152,9 @@ impl ValidationWaiter {
         rx_network_ledgers: Receiver<Ledger>,
         tx_loopback_validations_ledgers: Sender<LedgerOrValidation>,
         rx_own_ledgers: Receiver<LedgerOrValidation>,
-
+        to_acquire: Arc<RwLock<VecDeque<(SignedValidation, u128)>>>,
+        validation_dependencies: Arc<Mutex<HashMap<Digest, Vec<SignedValidation>>>>,
+        ledger_dependencies: Arc<Mutex<HashMap<Digest, (Vec<Ledger>, PublicKey)>>>, // contains pending acquires
         tx_full_validated_ledgers: Sender<Vec<Ledger>>,
     ) {
         tokio::spawn(async move {
@@ -165,9 +169,9 @@ impl ValidationWaiter {
                 rx_network_ledgers,
                 tx_loopback_validations_ledgers,
                 rx_own_ledgers,
-                to_acquire: VecDeque::new(),
-                validation_dependencies: HashMap::new(),
-                ledger_dependencies: HashMap::new(),
+                to_acquire,
+                validation_dependencies,
+                ledger_dependencies,
                 network: SimpleSender::new(),
             }
                 .run()
@@ -176,7 +180,10 @@ impl ValidationWaiter {
     }
 
     async fn try_deliver(&mut self, ledger_id: &Digest) {
-        match self.validation_dependencies.remove(ledger_id) {
+        info!("Locking (1)");
+        let mut guard = self.validation_dependencies.lock().await;
+        info!("Locking: Locked (1).");
+        match guard.remove(ledger_id) {
             Some(signed_validations) => {
                 for signed_validation in signed_validations.into_iter() {
                     self.tx_loopback_validations_ledgers.send(LedgerOrValidation::Validation(signed_validation))
@@ -188,7 +195,10 @@ impl ValidationWaiter {
         }
 
         let mut to_deliver = VecDeque::new();
-        self.to_acquire.retain(| (v, _) | return if v.ledger_id() == *ledger_id {
+        info!("Locking (4)");
+        let mut guard1 = self.to_acquire.write().await;
+        info!("Locking: locked (4)");
+        guard1.retain(|(v, _) | return if v.ledger_id() == *ledger_id {
             to_deliver.push_back(v.clone());
             false
         } else {
@@ -203,7 +213,14 @@ impl ValidationWaiter {
 
     #[async_recursion]
     async fn store_children(&mut self, parent_id: &Digest) {
-        match self.ledger_dependencies.remove(parent_id) {
+
+        let dependency = {
+            info!("Locking 2");
+            let mut guard = self.ledger_dependencies.lock().await;
+            info!("Locking: Locked 2");
+            guard.remove(parent_id)
+        };
+        match dependency {
             Some((children, _)) => {
                 for ledger in children.into_iter() {
                     self.store_ledger(ledger, false).await;
@@ -213,6 +230,7 @@ impl ValidationWaiter {
         }
     }
 
+    #[async_recursion]
     async fn store_ledger(&mut self, ledger: Ledger, own: bool){
         self.store.write(ledger.id.to_vec(), bincode::serialize(&ledger).unwrap()).await;
         let lid = ledger.id.clone();
@@ -226,8 +244,13 @@ impl ValidationWaiter {
     }
 
     async fn try_store_ledger(&mut self, ledger: Ledger) -> Option<(Digest, PublicKey)> {
-        if ledger.ancestors.is_empty() || self.ledger_dependencies.get(&ledger.id).is_none() {
-            return None;
+        {
+            info!("Locking 3");
+            let mut guard = self.ledger_dependencies.lock().await;
+            info!("Locking: locked 3");
+            if ledger.ancestors.is_empty() || guard.get(&ledger.id).is_none() {
+                return None;
+            }
         }
 
         let parent = ledger.ancestors.last().unwrap().clone();
@@ -237,17 +260,20 @@ impl ValidationWaiter {
                 return None;
             }
             Ok(None) => {
-                let (_, pk) = self.ledger_dependencies.get(&ledger.id).unwrap();
+                info!("Locking 4");
+                let mut lock = self.ledger_dependencies.lock().await;
+                info!("Locking: Locked 4");
+                let (_, pk) = lock.get(&ledger.id).unwrap();
                 let pk = pk.clone();
                 // self.ledger_dependencies.entry(parent).or_insert_with(Vec::new).push(ledger);
 
-                if let Some((ledgers, _)) = self.ledger_dependencies.get_mut(&parent)
+                if let Some((ledgers, _)) = lock.get_mut(&parent)
                 {
                     ledgers.push(ledger);
                 }else{
                     let mut ledgers = Vec::new();
                     ledgers.push(ledger);
-                    self.ledger_dependencies.insert(parent.clone(), (ledgers, pk.clone()));
+                    lock.insert(parent.clone(), (ledgers, pk.clone()));
                 }
                 return Some((parent, pk));
             }
@@ -259,17 +285,16 @@ impl ValidationWaiter {
     }
 
     async fn run(&mut self) {
-        let timer = sleep(Duration::from_millis(TIMER_RESOLUTION));
-        tokio::pin!(timer);
+        // let timer = sleep(Duration::from_millis(TIMER_RESOLUTION));
+        // tokio::pin!(timer);
         info!("quorum {}", self.ledger_master.quorum);
 
         loop {
             tokio::select! {
                 Some(signed_validation) = self.rx_network_validations.recv() => {
                     //TODO verify sig
-                    info!("Network validation {:?} {}, fully validated {}",
-                        signed_validation.validation.ledger_id,
-                        signed_validation.validation.seq,
+                    info!("Received network validation {:?}, fully validated {}",
+                        (signed_validation.validation.node_id, signed_validation.validation.ledger_id, signed_validation.validation.seq),
                         self.ledger_master.fully_validated);
                     self.ledger_master.add_validation(&signed_validation).await;
 
@@ -283,7 +308,10 @@ impl ValidationWaiter {
                         }
                         Ok(None) => {
                             info!("Need to acquire ledger {:?}", signed_validation.validation.ledger_id);
-                            self.to_acquire.push_back((signed_validation, clock()));
+                            info!("Locking (5)");
+                            let mut guard = self.to_acquire.write().await;
+                            info!("Locking: locked (5)");
+                            guard.push_back((signed_validation, clock()));
                         }
                         Err(e) => {
                             error!("{}", e);
@@ -321,7 +349,8 @@ impl ValidationWaiter {
                             info!("Own ledger {:?} {}, fully validated {}",
                                 ledger.id, ledger.seq, self.ledger_master.fully_validated);
                             self.ledger_master.add_ledger(ledger.clone()).await;
-                            self.store_ledger(ledger, true).await;
+                            self.store_ledger(ledger.clone(), true).await;
+                            info!("Finished adding own ledger {:?}", (ledger.id, ledger.seq));
                         },
                         LedgerOrValidation::Validation(signed_validation) => {
                             info!("Own validation {:?} {}, fully validated {}",
@@ -329,51 +358,12 @@ impl ValidationWaiter {
                                 signed_validation.validation.seq,
                                 self.ledger_master.fully_validated);
                             self.ledger_master.add_validation(&signed_validation).await;
+                            info!("Finished adding own validation {:?} {}, fully validated {}",
+                                signed_validation.validation.ledger_id,
+                                signed_validation.validation.seq,
+                                self.ledger_master.fully_validated);
                         },
                     }
-                },
-
-                () = &mut timer => {
-                    let now = clock();
-                    loop{
-                        let f = self.to_acquire.front();
-                        if f.is_none() {
-                            break;
-                        }
-
-                        let (_, t) = f.unwrap();
-                        if (now - t) < ACQUIRE_DELAY {
-                            break;
-                        }
-
-                        let (signed_validation, _) = self.to_acquire.pop_front().unwrap();
-                        let pk = signed_validation.validation.node_id.clone();
-                        let digest = signed_validation.validation.ledger_id.clone();
-
-                        self.validation_dependencies.entry(digest.clone()).or_insert_with(Vec::new).push(signed_validation);
-                        let entry = self.ledger_dependencies.get_mut(&digest);
-                        match entry {
-                            Some(_) => {},
-                            None => {
-                                // info!("Inserting {:?} into ledger_dependencies", digest);
-                                self.ledger_dependencies.insert(digest.clone(), (Vec::new(), pk.clone()));
-                                let address = self.committee
-                                .primary(&pk)
-                                .expect("Author is not in the committee")
-                                .primary_to_primary;
-
-                                let mut digests = vec![];
-                                digests.push(digest);
-                                let message = PrimaryPrimaryMessage::LedgerRequest(digests, self.name);
-                                let bytes = bincode::serialize(&message)
-                                .expect("Failed to serialize batch sync request");
-                                info!("Sending LedgerRequest to {:?} for ledger {:?}", pk, digest);
-                                self.network.send(address, Bytes::from(bytes)).await;
-                            }
-                        }
-                    }
-
-                    timer.as_mut().reset(Instant::now() + Duration::from_millis(TIMER_RESOLUTION));
                 }
             }
         }

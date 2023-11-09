@@ -57,6 +57,7 @@ pub struct Consensus {
     rx_primary: Receiver<PrimaryConsensusMessage>,
     rx_primary_data: Receiver<Batches>,
     tx_primary: Sender<ConsensusPrimaryMessage>,
+    rx_primary_timeout: Receiver<u32>,
 }
 
 impl Consensus {
@@ -68,6 +69,7 @@ impl Consensus {
         clock: Arc<RwLock<<ValidationsAdaptor as Adaptor>::ClockType>>,
         rx_primary: Receiver<PrimaryConsensusMessage>,
         rx_primary_data: Receiver<Batches>,
+        rx_primary_timeout: Receiver<u32>,
         tx_primary: Sender<ConsensusPrimaryMessage>,
     ) {
         tokio::spawn(async move {
@@ -91,6 +93,7 @@ impl Consensus {
                 timer_count: 0,
                 rx_primary,
                 rx_primary_data,
+                rx_primary_timeout,
                 tx_primary,
             }
                 .run()
@@ -106,6 +109,7 @@ impl Consensus {
         clock: Arc<RwLock<<ValidationsAdaptor as Adaptor>::ClockType>>,
         rx_primary: Receiver<PrimaryConsensusMessage>,
         rx_primary_data: Receiver<Batches>,
+        rx_primary_timeout: Receiver<u32>,
         tx_primary: Sender<ConsensusPrimaryMessage>,
     ) -> Self {
         let mut rng = OsRng {};
@@ -129,6 +133,7 @@ impl Consensus {
             rx_primary,
             rx_primary_data,
             tx_primary,
+            rx_primary_timeout,
         }
     }
 
@@ -157,11 +162,6 @@ impl Consensus {
 
                 Some(message) = self.rx_primary.recv() => {
                     match message {
-                        PrimaryConsensusMessage::Timeout(c) => {
-                            info!("Received Timeout event, count {}", c);
-                            self.timer_count = c;
-                            self.on_timeout().await;
-                        },
                         PrimaryConsensusMessage::Proposal(proposal) => {
                             // info!("Received proposal: {:?}", proposal);
                             self.on_proposal_received(proposal);
@@ -175,6 +175,12 @@ impl Consensus {
                             self.process_validation(validation).await;
                         },
                     }
+                },
+
+                Some(c) = self.rx_primary_timeout.recv() => {
+                    info!("Received Timeout event, count {}", c);
+                    self.timer_count = c;
+                    self.on_timeout().await;
                 }
             }
         }
@@ -291,6 +297,9 @@ impl Consensus {
     }
 
     async fn re_propose(&mut self) {
+
+        // self.proposals.get(&self.latest_ledger.id).unwrap()
+        //     .iter().for_each(|p| info!("{:?}", p.1.proposal));
         if self.check_consensus() {
             info!("We have consensus!");
             self.build_ledger().await;
@@ -341,15 +350,15 @@ impl Consensus {
             // Any batches that were included in our last proposal that do not make it to the next
             // proposal will be put back into the batch pool. This prevents batches that have not
             // been synced yet from ever getting into a ledger.
-            // let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
-            //     .filter(|batch| !new_proposal_set.contains(batch))
-            //     .collect::<Vec<&(Digest, WorkerId)>>();
-            // info!("Requeuing {:?} batches", to_queue.len());
-            // self.batch_pool.extend(to_queue);
-            // info!(
-            //     "Reproposing batch set w len: {:?}",
-            //     new_proposal_set.len()
-            // );
+            let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
+                .filter(|batch| !new_proposal_set.contains(batch))
+                .collect::<Vec<&(Digest, WorkerId)>>();
+            info!("Requeuing {:?} batches", to_queue.len());
+            self.batch_pool.extend(to_queue);
+            info!(
+                "Reproposing batch set w len: {:?}",
+                new_proposal_set.len()
+            );
             self.propose(new_proposal_set).await;
         }
     }

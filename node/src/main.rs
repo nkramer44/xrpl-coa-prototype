@@ -109,6 +109,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
             // let (tx_new_certificates, rx_new_certificates) = channel(CHANNEL_CAPACITY);
             // let (tx_feedback, rx_feedback) = channel(CHANNEL_CAPACITY);
             let (tx_primary_consensus, rx_primary_consensus) = channel(CHANNEL_CAPACITY);
+            let (tx_primary_consensus_timeout, rx_primary_consensus_timeout) = channel(1000);
             let (tx_primary_consensus_data, rx_primary_consensus_data) = channel(CHANNEL_CAPACITY);
             let (tx_consensus_primary, rx_consensus_primary) = channel(CHANNEL_CAPACITY);
             let node_id = keypair.name.clone();
@@ -121,6 +122,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
                 store,
                 tx_primary_consensus,
                 tx_primary_consensus_data,
+                tx_primary_consensus_timeout,
                 rx_consensus_primary,
             );
             let clock = Arc::new(RwLock::new(WallNetClock));
@@ -133,6 +135,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
                 clock,
                 rx_primary_consensus,
                 rx_primary_consensus_data,
+                rx_primary_consensus_timeout,
                 tx_consensus_primary,
             );
         }

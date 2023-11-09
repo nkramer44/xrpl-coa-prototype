@@ -32,10 +32,10 @@ impl PayloadReceiver {
 
     async fn run(&mut self) {
         while let Some((batch, worker_id)) = self.rx_store.recv().await {
-            if *batch.0.get(0).unwrap() == 0 as u8 {
+            // if *batch.0.get(0).unwrap() == 0 as u8 {
                 #[cfg(feature = "benchmark")]
                 info!("Created {:?}", batch);
-            }
+            // }
             let key = [batch.as_ref(), &worker_id.to_le_bytes()].concat();
             self.store.write(key.to_vec(), Vec::default()).await;
             self.batch_buf.push((batch, worker_id));

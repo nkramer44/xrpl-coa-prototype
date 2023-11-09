@@ -12,6 +12,7 @@ mod primary;
 pub mod proposal;
 mod validations;
 mod validation_waiter;
+mod validation_acquirer;
 
 // #[cfg(test)]
 // #[path = "tests/common.rs"]
