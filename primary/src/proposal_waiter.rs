@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
+use xrpl_consensus_core::LedgerIndex;
 use crate::{Batches, Ledger};
 use crate::proposal::{SignedProposal};
 
@@ -100,6 +101,7 @@ pub struct ProposalWaiter {
     pending: HashMap<Digest, SignedProposal>,
     ready: Vec<Digest>,
     dependencies: Dependencies,
+    last_full: LedgerIndex,
 }
 
 impl ProposalWaiter {
@@ -128,6 +130,7 @@ impl ProposalWaiter {
                 pending: HashMap::new(),
                 ready: Vec::new(),
                 dependencies: Dependencies::new(),
+                last_full: 0,
             }
                 .run()
                 .await;
@@ -204,6 +207,7 @@ impl ProposalWaiter {
                 Some(ledgers) = self.rx_ledgers.recv() => {
                     for l in ledgers{
                         info!("fully validated ledger {:?} {}", l.id, l.seq);
+                        self.last_full = l.seq;
                         // for batch in l.batch_set{
                         //     self.batch_cache.remove(&batch);
                         // }
@@ -216,9 +220,13 @@ impl ProposalWaiter {
                     for pid in self.ready.drain(..) {
                         match self.pending.remove(&pid) {
                             Some(proposal) => {
-                                debug!("(2) Send proposal {:?}", proposal);
-                                self.tx_loopback_proposal.send(proposal)
-                                .await.expect("Failed to send proposal");
+                                if proposal.proposal.ledger_index <= self.last_full {
+                                    debug!("(2) Dropping late proposal {:?} {:?}", pid, proposal);
+                                }else{
+                                    debug!("(2) Send proposal {:?} {:?}", pid, proposal);
+                                    self.tx_loopback_proposal.send(proposal)
+                                    .await.expect("Failed to send proposal");
+                                }
                             },
                             None => {
                                 panic!("Cannot find synced proposal");

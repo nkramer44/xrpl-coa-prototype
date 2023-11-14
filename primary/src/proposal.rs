@@ -56,7 +56,7 @@ impl Sub<u8> for ConsensusRound {
 pub struct Proposal {
     pub round: ConsensusRound,
     pub parent_id: Digest,
-    ledger_index: LedgerIndex,
+    pub ledger_index: LedgerIndex,
     pub batches: HashSet<(Digest, WorkerId)>,
     pub node_id: PublicKey
 }

@@ -510,7 +510,8 @@ impl Consensus {
         self.tx_primary.send(ConsensusPrimaryMessage::NewLedger(self.latest_ledger.clone())).await
             .expect("Failed to send new ledger to Primary.");
 
-        self.reset(&parent_id, true);
+        let wait_2sec = self.proposals.contains_key(&self.latest_ledger.id);
+        self.reset(&parent_id, wait_2sec);
 
         info!("Did a new ledger {:?}. Num Batches {:?}", (self.latest_ledger.id, self.latest_ledger.seq()), self.latest_ledger.batch_set.len());
 
