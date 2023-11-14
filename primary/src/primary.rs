@@ -261,10 +261,6 @@ impl MessageHandler for WorkerReceiverHandler {
     ) -> Result<(), Box<dyn Error>> {
         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
             WorkerPrimaryMessage::OurBatch(digest, worker_id) => {
-                // if *(digest.0.get(0).unwrap()) == 0 as u8 {
-                //     #[cfg(feature = "benchmark")]
-                //     info!("Created {:?}", digest);
-                // }
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))
@@ -272,10 +268,6 @@ impl MessageHandler for WorkerReceiverHandler {
                     .expect("Failed to send workers' digests");
             }
             WorkerPrimaryMessage::OthersBatch(digest, worker_id) => {
-                // if *(digest.0.get(0).unwrap()) == 0 as u8 {
-                //     #[cfg(feature = "benchmark")]
-                //     info!("Created {:?}", digest);
-                // }
                 self
                     .tx_worker_batches
                     .send((digest, worker_id))

@@ -147,7 +147,7 @@ impl Consensus {
                             // Store any batches that come from the primary in batch_pool to be included
                             // in a future proposal.
                             for batch in batches {
-                                if !self.batch_pool.contains(&batch) {
+                                if !self.negative_pool.remove(&batch) {
                                     self.batch_pool.push_front(batch);
                                 }
                             }
@@ -195,12 +195,12 @@ impl Consensus {
                 );
 
                 //adjust batch pool
-                //put back batches from latest proposal if have started deliberation
+                //(1) put back batches in latest proposal if have started deliberation
                 match self.proposals.entry(self.latest_ledger.id) {
                     Entry::Occupied(mut proposals) => {
                         match proposals.get_mut().entry(self.node_id) {
                             Entry::Occupied(proposal) => {
-                                info!("adjust pool, adding {:?} proposal batches", proposal.get().proposal.batches.len());
+                                debug!("adjust pool, adding {:?} proposal batches", proposal.get().proposal.batches.len());
                                 self.batch_pool.extend(proposal.get().proposal.batches.iter());
                             }
                             Entry::Vacant(_) => {}
@@ -209,32 +209,40 @@ impl Consensus {
                     Entry::Vacant(_) => {}
                 };
 
-                //adjust pool by adding batches on the wrong branch and removing from right branch
-                //by current design (oct 31, 2023), the node can be off by one ledger, not more
+                //(2) put back batches in the ledgers on the wrong branch
+                let mut preferred_ledger = self.validations.adaptor_mut().acquire(&preferred_id).await
+                    .expect("ValidationsAdaptor did not have a ledger in cache.");
+                let mut ancestors: HashSet<Digest> = preferred_ledger.ancestors.into_iter().collect();
+                ancestors.insert(preferred_id);
+                let mut wrong_ledger = self.latest_ledger.clone();
+                while !ancestors.contains(&wrong_ledger.id) {
+                    debug!("adjust pool, adding {:?} batches", wrong_ledger.batch_set.len());
+                    self.batch_pool.extend(wrong_ledger.batch_set.iter());
+                    let parent = wrong_ledger.ancestors.last().unwrap();
+                    wrong_ledger = self.validations.adaptor_mut().acquire(parent).await
+                        .expect("ValidationsAdaptor did not have a ledger in cache.");
+                }
+                //the common ancestor of the branches
+                let common_ancestor = wrong_ledger.id;
+                debug!("adjust pool, common_ancestor {:?} ", common_ancestor);
 
-                //put back batches in the ledgers on the wrong branch
-                info!("adjust pool, adding {:?} ledger batches", self.latest_ledger.batch_set.len());
-                self.batch_pool.extend(self.latest_ledger.batch_set.iter());
-
-                //latest's parent is the common ancestor of the branches
-                let common_ancestor = self.latest_ledger.ancestors.last().unwrap().clone();
-                info!("adjust pool, common_ancestor {:?} ", common_ancestor);
-                //find out batches in the ledgers on the right branch, and take them out
+                //(3) find out batches in the ledgers on the right branch, and take them out
+                let mut negative_pool: HashSet<(Digest, WorkerId)> = HashSet::new();
                 let mut l = self.validations.adaptor_mut().acquire(&preferred_id).await
                     .expect("ValidationsAdaptor did not have a ledger in cache.");
                 while l.id != common_ancestor {
-                    info!("adjust pool, ledger on preferred branch {:?} ", l.id);
-                    l.batch_set.iter().for_each(|x| {self.negative_pool.insert(x.clone());});
+                    debug!("adjust pool, ledger on preferred branch {:?} ", l.id);
+                    l.batch_set.iter().for_each(|x| {negative_pool.insert(x.clone());});
                     l = self.validations.adaptor_mut().acquire(&l.ancestors.last().unwrap()).await
                     .expect("ValidationsAdaptor did not have a ledger in cache.");
                 }
+                debug!("adjust pool, batches in the right branch {:?} ", negative_pool.len());
                 self.batch_pool = self.batch_pool.iter()
-                    .filter(|b| { !self.negative_pool.contains(b) })
+                    .filter(|b| { !negative_pool.remove(b) })
                     .map(|b| *b)
                     .collect();
-
-                //TODO filter new batches with negative_pool
-                //TODO clean the negative_pool
+                self.negative_pool.extend(negative_pool.into_iter());
+                debug!("adjust pool, total negative_pool {:?} ", self.negative_pool.len());
 
                 self.latest_ledger = self.validations.adaptor_mut().acquire(&preferred_id).await
                     .expect("ValidationsAdaptor did not have preferred ledger in cache.");
@@ -307,11 +315,7 @@ impl Consensus {
 
             // we should have, otherwise we should call propose_first()
             let proposals = self.proposals.get(&self.latest_ledger.id).unwrap();
-
             let num_proposals_for_this_ledger = proposals.len();
-
-            //TODO check rippled logic for reducing the number of proposals required
-
             if num_proposals_for_this_ledger < num_nodes_threshold as usize {
                 info!("We don't have consensus :( and We don't have enough proposals for child of ledger {:?}, need {}, have {}. Deferring to next round.",
                     self.latest_ledger.id, num_nodes_threshold, num_proposals_for_this_ledger);
@@ -341,15 +345,15 @@ impl Consensus {
             // Any batches that were included in our last proposal that do not make it to the next
             // proposal will be put back into the batch pool. This prevents batches that have not
             // been synced yet from ever getting into a ledger.
-            // let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
-            //     .filter(|batch| !new_proposal_set.contains(batch))
-            //     .collect::<Vec<&(Digest, WorkerId)>>();
-            // info!("Requeuing {:?} batches", to_queue.len());
-            // self.batch_pool.extend(to_queue);
-            // info!(
-            //     "Reproposing batch set w len: {:?}",
-            //     new_proposal_set.len()
-            // );
+            let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
+                .filter(|batch| !new_proposal_set.contains(batch))
+                .collect::<Vec<&(Digest, WorkerId)>>();
+            info!("Requeuing {:?} batches", to_queue.len());
+            self.batch_pool.extend(to_queue);
+            info!(
+                "Reproposing batch set w len: {:?}",
+                new_proposal_set.len()
+            );
             self.propose(new_proposal_set).await;
         }
     }
