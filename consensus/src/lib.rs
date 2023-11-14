@@ -24,6 +24,7 @@ pub mod adaptor;
 
 pub const INITIAL_WAIT: Duration = Duration::from_secs(2);
 pub const MAX_PROPOSAL_SIZE: usize = 200_000;
+pub const SLOW_PEER_CUT_OFF: u32 = 20;
 
 pub enum ConsensusState {
     NotSynced,
@@ -345,15 +346,12 @@ impl Consensus {
             // Any batches that were included in our last proposal that do not make it to the next
             // proposal will be put back into the batch pool. This prevents batches that have not
             // been synced yet from ever getting into a ledger.
-            let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
-                .filter(|batch| !new_proposal_set.contains(batch))
-                .collect::<Vec<&(Digest, WorkerId)>>();
-            info!("Requeuing {:?} batches", to_queue.len());
-            self.batch_pool.extend(to_queue);
-            info!(
-                "Reproposing batch set w len: {:?}",
-                new_proposal_set.len()
-            );
+            // let to_queue = proposals.get(&self.node_id).unwrap().proposal.batches.iter()
+            //     .filter(|batch| !new_proposal_set.contains(batch))
+            //     .collect::<Vec<&(Digest, WorkerId)>>();
+            // info!("Requeuing {:?} batches", to_queue.len());
+            // self.batch_pool.extend(to_queue);
+            info!("Reproposing batch set w len: {:?}",new_proposal_set.len());
             self.propose(new_proposal_set).await;
         }
     }
@@ -419,8 +417,8 @@ impl Consensus {
             .filter(|(r, _)| **r > self.latest_ledger.seq)
             .for_each(|(_, pks)| too_fast.extend(pks.iter()));
 
-        let too_slow: HashSet<&PublicKey> = if self.timer_count > 20 {
-            let slow_cut_off = self.timer_count - 20;//TODO 20 seconds?
+        let too_slow: HashSet<&PublicKey> = if self.timer_count > SLOW_PEER_CUT_OFF {
+            let slow_cut_off = self.timer_count - SLOW_PEER_CUT_OFF;
             self.freshness.iter()
                 .filter(|&(_, &last_seen)| last_seen <= slow_cut_off)
                 .map(|(pk, _)| pk).collect()

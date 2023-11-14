@@ -102,6 +102,7 @@ pub struct ProposalWaiter {
     ready: Vec<Digest>,
     dependencies: Dependencies,
     last_full: LedgerIndex,
+    recent_ledgers: VecDeque<Ledger>,
 }
 
 impl ProposalWaiter {
@@ -131,6 +132,7 @@ impl ProposalWaiter {
                 ready: Vec::new(),
                 dependencies: Dependencies::new(),
                 last_full: 0,
+                recent_ledgers: VecDeque::new(),
             }
                 .run()
                 .await;
@@ -150,20 +152,6 @@ impl ProposalWaiter {
                     match message {
                         Batches::Batches(batches) => {
                             self.ready.extend(self.dependencies.addBatches(&batches));
-                            //
-                            // for pid in self.dependencies.addBatches(&batches){
-                            //     match self.pending.remove(&pid) {
-                            //         Some(proposal) => {
-                            //             debug!("(2) Send proposal {:?}", proposal);
-                            //             self.tx_loopback_proposal.send(proposal)
-                            //             .await.expect("Failed to send proposal");
-                            //         },
-                            //         None => {
-                            //             panic!("Cannot find synced proposal");
-                            //         },
-                            //     }
-                            // }
-
                             for (batch, wid) in batches{
                                 self.batch_cache.insert((batch, wid));
                             }
@@ -208,9 +196,15 @@ impl ProposalWaiter {
                     for l in ledgers{
                         info!("fully validated ledger {:?} {}", l.id, l.seq);
                         self.last_full = l.seq;
-                        // for batch in l.batch_set{
-                        //     self.batch_cache.remove(&batch);
-                        // }
+                        self.recent_ledgers.push_back(l);
+                    }
+                    // We need to keep batches in fully validated ledger for longer time
+                    // since some slow nodes may propose them
+                    while self.recent_ledgers.len() > 256 {
+                        let l = self.recent_ledgers.pop_front().unwrap();
+                        for batch in l.batch_set{
+                            self.batch_cache.remove(&batch);
+                        }
                     }
                 },
 
