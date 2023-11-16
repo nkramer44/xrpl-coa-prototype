@@ -53,6 +53,7 @@ pub struct Consensus {
     progress: HashMap<LedgerIndex, HashSet<PublicKey>>,
     freshness: HashMap<PublicKey, u32>,
     timer_count: u32,
+    first_proposal_batches: HashSet<(Digest, WorkerId)>,
     //TODO cleanup, safe and simple to clean if knows when ledgers are fully validated
 
     rx_primary: Receiver<PrimaryConsensusMessage>,
@@ -90,6 +91,7 @@ impl Consensus {
                 progress: HashMap::new(),
                 freshness: HashMap::new(),
                 timer_count: 0,
+                first_proposal_batches: HashSet::new(),
                 rx_primary,
                 rx_primary_data,
                 tx_primary,
@@ -127,6 +129,7 @@ impl Consensus {
             progress: HashMap::new(),
             freshness: HashMap::new(),
             timer_count: 0,
+            first_proposal_batches: HashSet::new(),
             rx_primary,
             rx_primary_data,
             tx_primary,
@@ -228,21 +231,21 @@ impl Consensus {
                 debug!("adjust pool, common_ancestor {:?} ", common_ancestor);
 
                 //(3) find out batches in the ledgers on the right branch, and take them out
-                let mut negative_pool: HashSet<(Digest, WorkerId)> = HashSet::new();
+                //let mut negative_pool: HashSet<(Digest, WorkerId)> = HashSet::new();
                 let mut l = self.validations.adaptor_mut().acquire(&preferred_id).await
                     .expect("ValidationsAdaptor did not have a ledger in cache.");
                 while l.id != common_ancestor && l.id != Ledger::make_genesis().id {
                     debug!("adjust pool, ledger on preferred branch {:?} ", l.id);
-                    l.batch_set.iter().for_each(|x| {negative_pool.insert(x.clone());});
+                    l.batch_set.iter().for_each(|x| { self.negative_pool.insert(x.clone()); });
                     l = self.validations.adaptor_mut().acquire(&l.ancestors.last().unwrap()).await
-                    .expect("ValidationsAdaptor did not have a ledger in cache.");
+                        .expect("ValidationsAdaptor did not have a ledger in cache.");
                 }
-                debug!("adjust pool, batches in the right branch {:?} ", negative_pool.len());
-                self.batch_pool = self.batch_pool.iter()
-                    .filter(|b| { !negative_pool.remove(b) })
-                    .map(|b| *b)
-                    .collect();
-                self.negative_pool.extend(negative_pool.into_iter());
+                // debug!("adjust pool, batches in the right branch {:?} ", negative_pool.len());
+                // self.batch_pool = self.batch_pool.iter()
+                //     .filter(|b| { !negative_pool.remove(b) })
+                //     .map(|b| *b)
+                //     .collect();
+                // self.negative_pool.extend(negative_pool.into_iter());
                 debug!("adjust pool, total negative_pool {:?} ", self.negative_pool.len());
 
                 self.latest_ledger = self.validations.adaptor_mut().acquire(&preferred_id).await
@@ -286,17 +289,23 @@ impl Consensus {
     async fn propose_first(&mut self) {
         self.state = ConsensusState::Deliberating;
 
-        let batch_set: HashSet<(Digest, WorkerId)> = if self.batch_pool.len() > MAX_PROPOSAL_SIZE {
-            self.batch_pool.drain(self.batch_pool.len() - MAX_PROPOSAL_SIZE..).collect()
-        } else {
-            self.batch_pool.drain(..).collect()
-        };
+        let mut need = MAX_PROPOSAL_SIZE;
+        while need > 0 && self.batch_pool.len() > 0 {
+            let mut batch_set: HashSet<(Digest, WorkerId)> = if self.batch_pool.len() > need {
+                self.batch_pool.drain(self.batch_pool.len() - need..).collect()
+            } else {
+                self.batch_pool.drain(..).collect()
+            };
 
-        info!(
-            "Proposing first batch set w len {:?}", batch_set.len()/*,
-            Self::truncate_batchset(&batch_set)*/
-        );
-        self.propose(batch_set).await;
+            let common = self.negative_pool.intersection(&batch_set).map(|x| x.clone()).collect();
+            batch_set = batch_set.sub(&common);
+            self.negative_pool = self.negative_pool.sub(&common);
+            self.first_proposal_batches.extend(batch_set);
+            need = MAX_PROPOSAL_SIZE - self.first_proposal_batches.len();
+        }
+
+        info!("Proposing first batch set w len {:?}", self.first_proposal_batches.len());
+        self.propose(self.first_proposal_batches.clone()).await;
     }
 
     async fn re_propose(&mut self) {
@@ -525,21 +534,17 @@ impl Consensus {
         // }
     }
 
-    fn execute(&self) -> Ledger {
+    fn execute(&mut self) -> Ledger {
         let mut new_ancestors = self.latest_ledger.ancestors.clone();
         new_ancestors.push(self.latest_ledger.id());
-        //assert!(new_ancestors[0] == self.latest_ledger.id());
-        /*let mut new_ancestors = vec![self.latest_ledger.id()];
-        new_ancestors.extend_from_slice(self.latest_ledger.ancestors.as_slice());*/
-        //TODO assuming we proposed
         let our_proposal = self.proposals.get(&self.latest_ledger.id).unwrap().get(&self.node_id)
             .expect("Could not find our own proposal");
 
-        // TODO: Do we need to store a Vec<Digest> in Ledger and sort batches here so that they
-        //  yield the same ID on every validator?
-        // let batches = our_proposal.proposal.batches.iter()
-        //     .map(|b| b.0)
-        //     .collect();
+        self.negative_pool.extend(our_proposal.proposal.batches.sub(&self.first_proposal_batches));
+        //self.batch_pool.extend(self.first_proposal_batches.sub(&our_proposal.proposal.batches));
+
+        debug!("execute, batch pool {}, negative_pool {} ", self.batch_pool.len(), self.negative_pool.len());
+
         Ledger::new(
             self.latest_ledger.seq() + 1,
             new_ancestors,
@@ -548,6 +553,7 @@ impl Consensus {
     }
 
     fn reset(&mut self, parent: &Digest, waiting: bool) {
+        self.first_proposal_batches.clear();
         self.proposals.remove(parent);
         self.round.reset();
         let t = if waiting { self.now() } else { self.now().sub(INITIAL_WAIT) };
