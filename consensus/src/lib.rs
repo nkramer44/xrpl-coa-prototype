@@ -189,7 +189,7 @@ impl Consensus {
             info!("on_timeout, preferred ({:?} {}), latest ledger ({:?} {}) ", preferred_id, preferred_seq, self.latest_ledger.id, self.latest_ledger.seq);
 
             if preferred_id != self.latest_ledger.id() {
-                if *self.latest_ledger.ancestors.last().unwrap() == preferred_id {
+                if !self.latest_ledger.ancestors.is_empty() && *self.latest_ledger.ancestors.last().unwrap() == preferred_id {
                     error!("We just switched to {:?}'s parent {:?}", self.latest_ledger.id, preferred_id);
                 }
                 warn!(
